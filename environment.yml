@@ -1,0 +1,13 @@
+name: OptimalTrees
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - python=3.12.7
+  - gurobi=12.0.0
+  - pandas
+  - scikit-learn
+  - numpy=2.2.4
+  - matplotlib=3.10.0
+  - pip
+  - conda-forge::filelock
