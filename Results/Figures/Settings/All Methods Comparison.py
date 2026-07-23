@@ -1,4 +1,4 @@
-fig_title = f'All Methods Comparison'
+fig_title = f'Figure - All Methods Comparison'
 
 SPNoValCheck_Model = {'Base Model': 'BendRegOCT',
                       'Model Name Override': 'BendOCT',
@@ -32,13 +32,25 @@ EC_Model = {'Base Model': 'BendRegOCT',
 
 All_Model = {'Base Model': 'BendRegOCT',
              'Model Name Override': 'BendOCT',
+             'Tag': '*All',
              'Feature Name': 'Ablation',
-             'Hyperparameters': {'EQP Initial Cuts-Enabled': [True],
+             'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [True],
                                  'Solution Polishing-Enabled':[True],
                                  'Benders Cuts-Enhanced Cuts':[True]}}
 
+# Crude way of using the petroff10 colour cycle while skipping the second colour so that the individual comparison and
+# ablation result plots have matching colours.
+# mpl.rcParams['axes.prop_cycle'] = cycler('color', ['#3f90da', '#bd1f01', '#94a4a2', '#832db6', '#a96b59', '#e76300', '#b9ac70', '#717581', '#92dadd'])
+
+
+legend_kwargs = {'fontsize': 11,
+                 'ncol': 3,
+                 'loc': 'lower center',
+                 'bbox_to_anchor': (0.5125, 0.88)}
+
 models = [BendRegOCT_Model,
+          All_Model,
           SPNoValCheck_Model,
           EC_Model,
           EQP2FR_Model,

@@ -34,6 +34,7 @@ Settings used to generate figures in paper can be found in Results/Figures/Setti
 import os
 import itertools
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -41,6 +42,7 @@ from src.utils.data import valid_datasets
 from src.utils.logging import shorthand_dict
 
 import matplotlib.style as style
+import matplotlib as mpl
 
 try:
     # Accessible colour palette for publication figures
@@ -55,6 +57,11 @@ petroff_to_tableau = {'#ffa90e': 'tab:orange',
                       '#bd1f01': 'tab:green',
                       '#94a4a2': 'tab:red'}
 
+mpl.rcParams['axes.labelsize'] = 12
+mpl.rcParams['xtick.labelsize'] = 11
+mpl.rcParams['ytick.labelsize'] = 11
+
+
 ############### DEFAULT SETTINGS ###############
 
 # Filter defaults - These can be set to lists to act as filters on the plotted results
@@ -62,14 +69,20 @@ depth_filter = None
 lambda_filter = None
 dataset_filter = None
 encoding_filter = None
+global_hyperparameters = {}
 
 eqp_features_removed = None     # If set to an integer filters the plotted datasets to those that benefit from having the max split set  setto eqp_feature_removed
 lambda_cutoff = None            # If set to a float, only plot experiments with lambda <= lambda_cutoff
 
-plot_log_scale = False  # Plot time-axis on log scale
-save_figure = True      # Save figure to file
-ColourMap = None        # Force lines in plot to take particular colour depending on settings (see examples in Results/Figures/Settings EQP plots)
-LineStyleMap = None     # Force lines in plot to take particular line style depending on settings (see examples in Results/Figures/Settings EQP plots)
+plot_log_scale = False          # Plot time-axis on log scale
+save_figure = True              # Save figure to file
+legend_kwargs = None            # Settings for the legend
+empty_legend_entries = None     # Can set to list of legend entry indices which should be empty
+legend_ordering = None          # Provide a list of indices as an order on the legend
+opt_gap_range = 50              # Maximum optimality gap to display
+add_model_name = False          # Set to true to have the model name (E.g. BendersOCT or FlowOCT) to the legend labels
+ColourMap = None                # Force lines in plot to take particular colour depending on settings (see examples in Results/Figures/Settings EQP plots)
+LineStyleMap = None             # Force lines in plot to take particular line style depending on settings (see examples in Results/Figures/Settings EQP plots)
 file_format = 'jpg'
 
 ############### BASELINE MODELS ###############
@@ -77,16 +90,16 @@ file_format = 'jpg'
 FlowRegOCT_Model = {'Base Model': 'FlowRegOCT',
                     'Model Name Override': 'FlowOCT',
                     'Feature Name': 'Baseline',
-                    'Tag': 'Baseline'}
+                    'Tag': '*FlowOCT Baseline'}
 
 BendRegOCT_Model = {'Base Model': 'BendRegOCT',
-                    'Model Name Override': 'BendOCT',
+                    'Model Name Override': 'BendersOCT',
                     'Feature Name': 'Baseline',
-                    'Tag': 'Baseline'}
+                    'Tag': '*Baseline'}
+
+
 
 ############### USER SETTINGS ###############
-
-eqp_features_removed = None
 
 # Set up filters on optimisation parameters here
 depth_filter = [3,4]
@@ -96,10 +109,60 @@ lambda_filter = [0.08, 0.06, 0.04, 0.02, 0.01,
 
 fig_title = ''
 
+############### GLOBAL HYPERPARAMETERS ###############
+# Define hyperparameter splits which should apply for all models. For example, to always split by lambda or depth
+# These are injected into the hyperparameters for every model, so they should be valid keys for every model
+global_hyperparameters = {}
+
+############### GLOBAL HYPERPARAMETERS ###############
+# Define hyperparameter splits which should apply for all models. For example, to always split by lambda or depth
+# These are injected into the hyperparameters for every model, so they should be valid keys for every model
+global_hyperparameters = {'Encoding': ['Quantile Buckets', 'Quantile Thresholds']}
+
 ############### ACCELERATED MODELS ###############
 
+fig_title = f'Figure - Scalability (encoding)'
+
+add_model_name = True
+
+# encoding_filter = ['Quantile Thresholds', 'Quantile Buckets']
+# dataset_filter =
+
+BendRegOCT_Model = {'Base Model': 'BendRegOCT',
+                    'Model Name Override': 'Baseline',
+                    'Feature Name': 'Baseline',
+                    'Colour': '#3f90da'}
+
+All_Model = {'Base Model': 'BendRegOCT',
+                  'Model Name Override': 'AccelOCT',
+             'Feature Name': 'Ablation',
+             'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
+                                 'Path Bound Cutting Planes-Enabled': [True],
+                                 'Solution Polishing-Enabled':[True],
+                                 'Benders Cuts-Enhanced Cuts':[True]},
+                 'Colour': '#bd1f01'}
+
+MinusPBCP_Model = {'Base Model': 'BendRegOCT',
+                 'Model Name Override': 'EQPOCT',
+                 'Feature Name': 'Ablation',
+                  'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
+                                     'Path Bound Cutting Planes-Enabled': [False],
+                                     'Solution Polishing-Enabled':[True],
+                                     'Benders Cuts-Enhanced Cuts':[True]},
+                 'Colour': '#ffa90e'}
+
+LineStyleMap = ('Encoding', {'Quantile Thresholds': '--',
+                          'Quantile Buckets': '-'})
+
+legend_kwargs = {'fontsize': 11,
+                 'ncol': 3,
+                 'loc': 'lower center',
+                 'columnspacing': 1.,
+                 'bbox_to_anchor': (0.5125, 0.88)}
+
 models = [BendRegOCT_Model,
-          FlowRegOCT_Model]
+          MinusPBCP_Model,
+          All_Model]
 
 ############### PROCESS SETTINGS ###############
 
@@ -108,10 +171,10 @@ if eqp_features_removed is not None:
 else:
     eqp_filter = None
 
-if lambda_cutoff is not None:
+if lambda_cutoff is not None and lambda_filter is not None:
     lambda_filter = [_lambda for _lambda in lambda_filter if _lambda <= lambda_cutoff]
-else:
-    lambda_filter = None
+# else:
+#     lambda_filter = None
 
 filename = fig_title
 file_dir = os.path.join('../../Results', 'Figures')
@@ -176,8 +239,8 @@ for model in models:
     else:
         model['Filename'] = ''.join(model['Feature Name'].split())
         model['File Base'] = os.path.join('../..', 'Results', model['Base Model'], model['Filename'])
-        df = pd.read_csv(os.path.join(model['File Base'],prefix + model['Filename'] + suffix + '.csv'))
-
+        csv_path = os.path.join(model['File Base'], prefix + model['Filename'] + suffix + '.csv')
+        df = pd.read_csv(csv_path)
     # By default set encoding scheme and number of buckets to an empty string
     if 'Encoding' in df:
         df['Encoding'] = df['Encoding'].fillna('')
@@ -190,13 +253,18 @@ for model in models:
         df['Buckets'] = ''
 
     hyperparameters = model.get('Hyperparameters',{})
+    try:
+        hyperparameters |= global_hyperparameters   # Merge in global hyperparameters
+    except:
+        print('No global hyperparameters defined')
+
     model_name = model.get('Model Name Override', model['Base Model'])
 
     if 'Tag' in model:
         if model['Tag'][0] == '*':
-            model_tag = f' {model['Tag'][1:]}'
+            model_tag = f'{model['Tag'][1:]}'
         else:
-            model_tag = f' ({model['Tag']})'
+            model_tag = f'({model['Tag']})'
     else:
         model_tag = ''
 
@@ -216,38 +284,49 @@ for model in models:
             disabled_hps = set()
 
             for hp_name, hp_value in hps.items():
-                hp_name_split = hp_name.split('-')
-
-                if len(hp_name_split) == 1:
-                    hp_name_split = hp_name_split[0]
-                    hp_dict[shorthand_dict.get(hp_name_split, hp_name_split)] = shorthand_dict.get(hp_value, hp_value)
-
-                elif len(hp_name_split) == 2:
-                    hp_name_split = tuple(shorthand_dict.get(n, n) for n in hp_name_split)
-                    if hp_name_split[0] not in hp_dict:
-                        hp_dict[hp_name_split[0]] = []
-
-                    if isinstance(hp_value, bool):
-                        if hp_name_split[1] == 'ON':
-                            if not hp_value:
-                                disabled_hps.add(hp_name_split[0])
-
-                        elif hp_value:
-                            hp_dict[hp_name_split[0]].append(hp_name_split[1])
-
-                    elif isinstance(hp_value, int):
-                        hp_dict[hp_name_split[0]].append(f'{hp_name_split[1]}={hp_value}')
-
-                    else:
-                        hp_dict[hp_name_split[0]].append(f'{hp_name_split[1]}={shorthand_dict.get(hp_value,hp_value)}')
+                if isinstance(hp_value, tuple):
+                    pass
+                    hp_dict[hp_name] = hp_value[0]
 
                 else:
-                    print(f'Invalid hyperparameter name: {hp_name}')
-                    assert False
+                    hp_name_split = hp_name.split('-')
+                    if len(hp_name_split) == 1:
+                        hp_name_split = hp_name_split[0]
+                        hp_dict[shorthand_dict.get(hp_name_split, hp_name_split)] = shorthand_dict.get(hp_value, hp_value)
+
+                    elif len(hp_name_split) == 2:
+                        hp_name_split = tuple(shorthand_dict.get(n, n) for n in hp_name_split)
+                        if hp_name_split[0] not in hp_dict:
+                            hp_dict[hp_name_split[0]] = []
+
+                        if isinstance(hp_value, bool):
+                            if hp_name_split[1] == 'ON':
+                                if not hp_value:
+                                    disabled_hps.add(hp_name_split[0])
+
+                            elif hp_value:
+                                hp_dict[hp_name_split[0]].append(hp_name_split[1])
+
+                        elif isinstance(hp_value, int):
+                            hp_dict[hp_name_split[0]].append(f'{hp_name_split[1]}={hp_value}')
+
+                        else:
+                            hp_dict[hp_name_split[0]].append(f'{hp_name_split[1]}={shorthand_dict.get(hp_value,hp_value)}')
+
+                    else:
+                        print(f'Invalid hyperparameter name: {hp_name}')
+                        assert False
 
             hp_combo_string_list = []
 
             for feat_name, hp_settings in hp_dict.items():
+                if feat_name == 'lambda':
+                    feat_name = '$\\lambda$'
+                if feat_name == 'depth':
+                    feat_name = 'd'
+                if feat_name == 'Encoding':
+                    feat_name = 'enc'
+
                 if feat_name in disabled_hps:
                     continue
                 elif not isinstance(hp_settings, list):
@@ -256,13 +335,16 @@ for model in models:
                 elif len(hp_settings) == 0:
                     hp_combo_string_list.append(feat_name)
                 elif (feat_name == 'Benders Cuts') and (hp_settings[0] == 'EC'):
-                    hp_combo_string_list.append('EC')
+                    hp_combo_string_list.append('MC')
                 else:
                     hp_combo_string_list.append(f'{feat_name}({"+".join(setting for setting in hp_settings)})')
+            if add_model_name:
+                hp_combo_string = model_name + ' + '
+            else:
+                hp_combo_string = ''
+            hp_combo_string += ' + '.join(hp_combo_string_list)
 
-            hp_combo_string = model_name + ' + ' + ' + '.join(hp_combo_string_list)
-
-            hp_combo_string += model_tag
+            hp_combo_string += f' {model_tag}'
 
             # if 'Tag' in model:
             #     hp_combo_string += f' ({model['Tag']})'
@@ -271,9 +353,10 @@ for model in models:
 
         model['hp Filters'] = hp_filters
     else:
-
-        model['hp Filters'] = {model_name + model_tag: {}}
-
+        if add_model_name:
+            model['hp Filters'] = {f'{model_name} {model_tag}': {}}
+        else:
+            model['hp Filters'] = {model_tag: {}}
         # if 'Tag' in model:
         #     model['hp Filters'] = {model_name + f' ({model['Tag']})': {}}
         # else:
@@ -325,7 +408,11 @@ for model in models:
     for name, filter in hp_filters.items():
         b = pd.Series([True] * df.shape[0])
         for column, condition in filter.items():
-            b &= (df[column] == condition)
+            if isinstance(condition, tuple):
+                custom_condition = condition[1]
+                b &= custom_condition(df[column])
+            else:
+                b &= (df[column] == condition)
 
         if dataset_filter is not None:
             b &= (df['Dataset'].isin(dataset_filter))
@@ -376,9 +463,29 @@ fig.subplots_adjust(wspace=0)
 
 base_num_solved = None
 
+legend_idx = 0
+
+ordering = []
+
 # Loop over each model and it's set of rows and plot on figure
 for model in models:
+    model_row_idx = 0
+
+    if 'Order' in model:
+        row_ordering = model['Order']
+    else:
+        row_ordering = None
+
+    # Allow setting of linestyle per model. Defaults to normal line
+    linestyle = model.get('Line Style', '-')
+    colour = model.get('Colour', None)
+
     for name, rows_info in model['Rows'].items():
+
+        if empty_legend_entries is not None and legend_idx in empty_legend_entries:
+            axs[1].plot(np.nan, np.nan, '-', color='none', label=' ')
+            ordering.append(legend_idx)
+
         rows_time = rows_info['Time']
         rows_gap = rows_info['Gap']
         rows_filter = rows_info['Filter']
@@ -397,16 +504,16 @@ for model in models:
             else:
                 print(f'{name} solved {feature_num_solved} within time limit (Solved {base_num_solved} within {rows_time.iloc[base_num_solved]['Solve Time']:.2f}s)')
 
-        linestyle = '-'
-        color = None
-
         if ColourMap is not None:
             colour_feature, cmap = ColourMap
 
             if colour_feature in rows_filter:
                 feat_value = rows_filter[colour_feature]
 
-                color = cmap[feat_value]
+                if isinstance(cmap, dict):
+                    colour = cmap[feat_value]
+                elif callable(cmap):
+                    colour = cmap(feat_value)
 
 
         if LineStyleMap is not None:
@@ -415,21 +522,31 @@ for model in models:
             if line_feature in rows_filter:
                 feat_value = rows_filter[line_feature]
 
-                linestyle = lmap[feat_value]
+                if isinstance(lmap, dict):
+                    linestyle = lmap[feat_value]
+                elif callable(lmap):
+                    linestyle = lmap(feat_value)
 
         if plot_log_scale:
             axs[0].semilogx(rows_time['Solve Time'], rows_time.index,
-                            label=name, drawstyle='steps', linestyle=linestyle, color=color)
+                            drawstyle='steps', linestyle=linestyle, color=colour)
         else:
             axs[0].plot(rows_time['Solve Time'], rows_time.index,
-                        label=name, drawstyle='steps', linestyle=linestyle, color=color)
+                        drawstyle='steps', linestyle=linestyle, color=colour)
 
 
         axs[1].plot(rows_gap['Gap'] * 100, rows_gap.index + rows_time.shape[0],
-                    label=name, drawstyle='steps', linestyle=linestyle, color=color)
+                    label=name, drawstyle='steps', linestyle=linestyle, color=colour)
 
+        if row_ordering is None:
+            ordering.append(legend_idx)
+        else:
+            ordering.append(row_ordering[model_row_idx])
 
-opt_gap_xlim = min(100, max_opt_gap * 100)
+        legend_idx += 1     # Track which legend entry index we are up to
+        model_row_idx += 1  # Track which row we are up to from the model
+
+opt_gap_xlim = min(opt_gap_range, max_opt_gap * 100)
 # opt_gap_xlim = max_opt_gap * 100
 
 
@@ -441,10 +558,29 @@ axs[0].set_ylabel('Number of Instances Solved within Time')
 axs[0].set_ylim(0,num_rows+1)
 axs[1].yaxis.set_label_position('right')
 axs[1].set_ylabel('Number of Instances Solved within Gap')
-axs[1].legend(fontsize=9)
+
+# axs[0].grid(axis='y')
+# axs[1].grid(axis='y')
+
+handles, labels = axs[1].get_legend_handles_labels()
+
+if legend_ordering is not None:
+    handles_ordered = [handles[idx] for idx in legend_ordering]
+    labels_ordered = [labels[idx] for idx in legend_ordering]
+else:
+    handles_ordered, labels_ordered = handles, labels
+
+if legend_kwargs is None:
+    axs[1].legend(handles_ordered, labels_ordered, fontsize=11)
+else:
+    fig.legend(handles_ordered, labels_ordered, **legend_kwargs)
+
+
 # plt.suptitle(fig_title)
 
 if save_figure:
-    plt.savefig(os.path.join(file_dir, filename + f'.{file_format}'), dpi=500)
+    plt.savefig(os.path.join(file_dir, filename + f'.{file_format}'),
+                bbox_inches='tight',
+                dpi=500)
 
 plt.show()

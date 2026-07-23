@@ -2,9 +2,14 @@
 
 from sklearn import tree
 from sklearn.tree import DecisionTreeClassifier
+import numba
 import numpy as np
 
 from src.utils.logging import log_error
+from src.utils.ParetoSets import GetParetoSets
+
+# from line_profiler import profile
+import time
 
 class Node():
     """Node class for CART algorithm
@@ -197,7 +202,7 @@ def node_impurity(y):
 
     return impurity
 
-def create_recursive_tree(I, F, pV, wV, node_branch_feature, samples_in_node, tree):
+def create_recursive_tree(I, F, pV, wV, node_branch_feature, samples_in_node, tree, require_samples_in_node=False):
     root_node = Node(1, I, F, 0)
 
     to_explore = [root_node]
@@ -215,8 +220,15 @@ def create_recursive_tree(I, F, pV, wV, node_branch_feature, samples_in_node, tr
             node.node_type = 'branch'
             left_child, right_child = tree.children(n)
 
-            node.left_child = Node(left_child, samples_in_node[left_child], features_in_node, node_depth + 1)
-            node.right_child = Node(right_child, samples_in_node[right_child], features_in_node, node_depth + 1)
+            left_node_samples = samples_in_node[left_child]
+            right_node_samples = samples_in_node[right_child]
+
+            if require_samples_in_node:
+                if (len(left_node_samples) == 0) or (len(right_node_samples) == 0):
+                    continue
+
+            node.left_child = Node(left_child, left_node_samples, features_in_node, node_depth + 1)
+            node.right_child = Node(right_child, right_node_samples, features_in_node, node_depth + 1)
 
             node.left_child.parent = node
             node.right_child.parent = node
@@ -362,14 +374,39 @@ def Custom_CART_Heuristic(X,y,tree,opts,cat_feature_maps=None,num_feature_maps=N
 
     if 'CART polish solutions' in opts:
 
-        polished_soln = optimise_regularised_subtrees(X, y, tree, opts, branch_feature, root_node, alpha)
+        if 'Polish Worst Case' in opts:
+            polished_soln = optimise_subtrees_worst_case(X, y, tree, opts, branch_feature, root_node, alpha)
+        else:
+            polished_soln = optimise_regularised_subtrees(X, y, tree, opts, branch_feature, root_node, alpha)
 
         b_subtrees, p_subtrees, w_subtrees, theta_polished = polished_soln
 
         if b_subtrees is not None:
 
-            obj_CART = sum(theta) / len(theta) - alpha * sum(p.values())
-            obj_polished = sum(theta_polished) / len(theta) - alpha * sum(p_subtrees.values())
+            if 'Polish Worst Case' in opts:
+                theta_np = np.asarray(theta)
+                theta_polished_np = np.asarray(theta_polished)
+
+                min_CART_accuracy = float('inf')
+                min_polished_accuracy = float('inf')
+
+                for k in K:
+                    class_k_idx = (y == k)
+
+                    class_k_CART_accuracy = theta_np[class_k_idx].sum() / sum(class_k_idx)
+                    class_k_polished_accuracy = theta_polished_np[class_k_idx].sum() / sum(class_k_idx)
+
+                    if class_k_CART_accuracy < min_CART_accuracy:
+                        min_CART_accuracy = class_k_CART_accuracy
+                    if class_k_polished_accuracy < min_polished_accuracy:
+                        min_polished_accuracy = class_k_polished_accuracy
+
+                obj_CART = min_CART_accuracy - alpha * sum(p.values())
+                obj_polished = min_polished_accuracy - alpha * sum(p.values())
+
+            else:
+                obj_CART = sum(theta) / len(theta) - alpha * sum(p.values())
+                obj_polished = sum(theta_polished) / len(theta) - alpha * sum(p_subtrees.values())
 
             if obj_polished > obj_CART:
                 # Store some information in the solution dict which is useful for logging
@@ -399,6 +436,8 @@ def Custom_CART_Heuristic(X,y,tree,opts,cat_feature_maps=None,num_feature_maps=N
                 # with the solution polishing subroutine. Log a warning if this happens
                 log_error(199, f'Solution polishing returned a worse objective than CART Heuristic. objCART={obj_CART}, objPolished={obj_polished}')
 
+        else:
+            print('Polishing of CART solution failed')
 
     soln_dict['b'] = b
     soln_dict['w'] = w
@@ -1991,6 +2030,386 @@ def optimise_depth2_subtree_reference(X,y,
 
     return b, w, theta
 
+@numba.jit(nopython=True, cache=True)
+def filter(costs, solns, num_leaves_appended=False):
+    """
+
+    By default we assume that we seek to maximise all objectives. Can be modified to expect one extra objective column
+    for the number of leaves by setting num_leaves_appended. The extra column is assumed to be minimised. Returns cost
+    and soln array with only non-dominated costs
+
+    Args:
+        costs: (n_rows x n_objectives) size ndarray
+        solns: (n_rows x n_solns) size ndarray
+        num_leaves_appended: Flag to treat the last cost column as an objective to be minimised
+
+    Returns:
+
+    """
+
+
+    if num_leaves_appended:
+        max_senses = np.arange(costs.shape[1] - 1)
+    else:
+        max_senses = np.arange(costs.shape[1])
+
+    mask = GetParetoSets(costs, max_senses)
+
+    return costs[mask], solns[mask]
+
+@numba.jit(nopython=True, cache=True)
+def merge(costs1, costs2,
+          solns1, solns2,
+          merge_style=0):
+
+    n1, n_objectives = costs1.shape
+    n2 = costs2.shape[0]
+    n_soln = solns1.shape[1]
+
+    costs = np.zeros((n1 * n2, n_objectives), dtype=costs1.dtype)
+
+    if merge_style == 0:
+        solns = np.zeros((n1 * n2, n_soln), dtype=solns1.dtype)
+    elif merge_style == 1:
+        n_solns1, n_solns2 = solns1.shape[1], solns2.shape[1]
+        solns = np.zeros((n1 * n2, n_solns1 + n_solns2), dtype=solns1.dtype)
+
+    for i in range(n1):
+        start = i * n2
+        end = (i+1) * n2
+
+        costs[start:end, :] = costs1[i,:] + costs2
+
+        if merge_style == 0:
+            solns[start:end, :] = solns1[i,:] + solns2
+        elif merge_style == 1:
+            solns[start:end, :n_solns1] = solns1[i,:]
+            solns[start:end, n_solns1:] = solns2
+
+    return costs, solns
+
+@numba.jit(nopython=True, cache=True)
+def build_nondominated_solutions(D, FQ0, FQ1, FQ00, FQ01, FQ10, FQ11):
+
+    # soln array has format:
+    # [b1, b2, b3, w1, w2, w3, w4, w5, w6, w7]
+    # If node is unused, entry is set to negative 1 by default
+
+    n_objectives, n_features, _ = FQ00.shape
+    n_soln = 10
+
+    single_leaf_cost_array = np.zeros((n_objectives, n_objectives + 1), dtype=np.int16)
+    single_leaf_cost_array[:,-1] = 1
+    single_leaf_soln_array = np.zeros((n_objectives, n_soln), dtype=np.int16)
+
+    full_left_solns = []
+    full_right_solns = []
+    partial_left_solns = []
+    partial_right_solns = []
+    full_left_cost_arrays = []
+    full_right_cost_arrays = []
+    partial_left_cost_arrays = []
+    partial_right_cost_arrays = []
+
+    partial_num_rows = (n_objectives)
+    full_num_rows = (n_features - 1) * (n_objectives ** 2 - n_objectives)
+
+    # Initialise
+    for f in range(n_features):
+        partial_left_cost_arrays.append(np.zeros((partial_num_rows, n_objectives), dtype=np.int16))
+        partial_right_cost_arrays.append(np.zeros((partial_num_rows, n_objectives), dtype=np.int16))
+        partial_left_solns.append(np.zeros((partial_num_rows, n_soln), dtype=np.int16))
+        partial_right_solns.append(np.zeros((partial_num_rows, n_soln), dtype=np.int16))
+
+        full_left_cost_arrays.append(np.zeros((full_num_rows, n_objectives), dtype=np.int16))
+        full_right_cost_arrays.append(np.zeros((full_num_rows, n_objectives), dtype=np.int16))
+        full_left_solns.append(np.zeros((full_num_rows, n_soln), dtype=np.int16))
+        full_right_solns.append(np.zeros((full_num_rows, n_soln), dtype=np.int16))
+
+    # Single leaf solutions are easy to calculate
+    for k in range(n_objectives):
+        single_leaf_cost_array[k,k] = D[k]
+        single_leaf_soln_array[k,3] = k + 1
+
+    for f_a in range(n_features):
+        idx = 0
+        for f_b in range(n_features):
+            if f_a != f_b:
+                for kL in range(n_objectives):
+                    for kR in range(n_objectives):
+                        if kL != kR:
+                            # Left off f_a, then left off f_b
+                            full_left_cost_arrays[f_a][idx, kL] = FQ00[kL, f_a, f_b]
+
+                            # Left off f_a, then right off f_b
+                            full_left_cost_arrays[f_a][idx, kR] = FQ01[kR, f_a, f_b]
+
+                            # Fill in soln for left subtree
+                            full_left_solns[f_a][idx, 0] = f_a + 1
+                            full_left_solns[f_a][idx, 1] = f_b + 1
+                            full_left_solns[f_a][idx, 6] = kL + 1
+                            full_left_solns[f_a][idx, 7] = kR + 1
+
+                            # [0,  1,  2,  3,  4,  5,  6,  7,  8,  9]
+                            # [b1, b2, b3, w1, w2, w3, w4, w5, w6, w7]
+
+                            # Right off f_a, then left off f_b
+                            full_right_cost_arrays[f_a][idx, kL] = FQ10[kL, f_a, f_b]
+                            # Right off f_a, then right off f_b
+                            full_right_cost_arrays[f_a][idx, kR] = FQ11[kR, f_a, f_b]
+
+                            # Fill in soln for right subtree.
+                            # Note: We do not fill in parent feature so that we can easily merge left and right subtrees
+                            # full_right_solns[f_a][idx, 0] = f_a + 1
+                            full_right_solns[f_a][idx, 2] = f_b + 1
+                            full_right_solns[f_a][idx, 8] = kL + 1
+                            full_right_solns[f_a][idx, 9] = kR + 1
+
+                            idx += 1
+
+            else:
+                partial_idx = 0
+                for k in range(n_objectives):
+                    # Left off of f_a
+                    partial_left_cost_arrays[f_a][partial_idx, k] = FQ0[k, f_a]
+
+                    partial_left_solns[f_a][partial_idx, 0] = f_a + 1
+                    partial_left_solns[f_a][partial_idx, 4] = k + 1
+
+                    # Right off of f_b
+                    partial_right_cost_arrays[f_a][partial_idx, k] = FQ1[k, f_a]
+
+                    # Leave parent feature empty in right subtree solution for easy merging with left subtree solutions
+                    # partial_right_solns[f_a][partial_idx, 0] = f_a + 1
+                    partial_right_solns[f_a][partial_idx, 5] = k + 1
+
+                    partial_idx += 1
+
+    two_leaf_cost_arrays = []
+    two_leaf_soln_arrays = []
+    three_leaf_cost_arrays = []
+    three_leaf_soln_arrays = []
+    four_leaf_cost_arrays = []
+    four_leaf_soln_arrays = []
+
+    for f in range(n_features):
+        # Filter the left and right subtrees separately
+        full_left_cost_arrays[f], full_left_solns[f] = filter(full_left_cost_arrays[f], full_left_solns[f])
+        full_right_cost_arrays[f], full_right_solns[f] = filter(full_right_cost_arrays[f], full_right_solns[f])
+
+        # Merge partial left and right subtrees to get two leaf subtrees
+        two_leaf_cost_temp, two_leaf_soln_temp = filter(*merge(partial_left_cost_arrays[f], partial_right_cost_arrays[f],
+                                                               partial_left_solns[f], partial_right_solns[f]))
+
+        # Merge partial left subtrees with full right subtrees to get right-dominant three leaf subtrees
+        three_leaf_right_cost_temp, three_leaf_right_soln_temp = merge(partial_left_cost_arrays[f], full_right_cost_arrays[f],
+                                                                       partial_left_solns[f], full_right_solns[f])
+
+        # Merge full left subtrees with partial right subtrees to get left-dominant three leaf subtrees
+        three_leaf_left_cost_temp, three_leaf_left_soln_temp = merge(full_left_cost_arrays[f], partial_right_cost_arrays[f],
+                                                                     full_left_solns[f], partial_right_solns[f])
+        # Stack both sets of three leaf solutions
+        three_leaf_cost_temp = np.vstack((three_leaf_right_cost_temp, three_leaf_left_cost_temp))
+        three_leaf_soln_temp = np.vstack((three_leaf_right_soln_temp, three_leaf_left_soln_temp))
+
+        three_leaf_cost_temp, three_leaf_soln_temp = filter(three_leaf_cost_temp, three_leaf_soln_temp)
+
+        # Merge full left and right subtrees to get four leaf subtrees
+        four_leaf_cost_temp, four_leaf_soln_temp = filter(*merge(full_left_cost_arrays[f], full_right_cost_arrays[f],
+                                                                 full_left_solns[f], full_right_solns[f]))
+
+        two_leaf_cost_arrays.append(two_leaf_cost_temp)
+        two_leaf_soln_arrays.append(two_leaf_soln_temp)
+        three_leaf_cost_arrays.append(three_leaf_cost_temp)
+        three_leaf_soln_arrays.append(three_leaf_soln_temp)
+        four_leaf_cost_arrays.append(four_leaf_cost_temp)
+        four_leaf_soln_arrays.append(four_leaf_soln_temp)
+
+    two_leaf_total_num_rows = 0
+    three_leaf_total_num_rows = 0
+    four_leaf_total_num_rows = 0
+
+    for f in range(n_features):
+        two_leaf_total_num_rows += two_leaf_cost_arrays[f].shape[0]
+        three_leaf_total_num_rows += three_leaf_cost_arrays[f].shape[0]
+        four_leaf_total_num_rows += four_leaf_cost_arrays[f].shape[0]
+
+    two_leaf_cost_array = np.zeros((two_leaf_total_num_rows, n_objectives + 1), dtype=two_leaf_cost_arrays[0].dtype)
+    two_leaf_soln_array = np.zeros((two_leaf_total_num_rows, n_soln), dtype=two_leaf_soln_arrays[0].dtype)
+    three_leaf_cost_array = np.zeros((three_leaf_total_num_rows, n_objectives + 1), dtype=three_leaf_cost_arrays[0].dtype)
+    three_leaf_soln_array = np.zeros((three_leaf_total_num_rows, n_soln), dtype=three_leaf_soln_arrays[0].dtype)
+    four_leaf_cost_array = np.zeros((four_leaf_total_num_rows, n_objectives + 1), dtype=four_leaf_cost_arrays[0].dtype)
+    four_leaf_soln_array = np.zeros((four_leaf_total_num_rows, n_soln), dtype=four_leaf_soln_arrays[0].dtype)
+
+    two_leaf_cost_array[:,-1] = 2
+    three_leaf_cost_array[:, -1] = 3
+    four_leaf_cost_array[:,-1] = 4
+
+    two_leaf_start_idx = 0
+    three_leaf_start_idx = 0
+    four_leaf_start_idx = 0
+
+    for f in range(n_features):
+        two_leaf_num_rows = two_leaf_cost_arrays[f].shape[0]
+        three_leaf_num_rows = three_leaf_cost_arrays[f].shape[0]
+        four_leaf_num_rows = four_leaf_cost_arrays[f].shape[0]
+
+        two_leaf_cost_array[two_leaf_start_idx:two_leaf_start_idx + two_leaf_num_rows, :-1] = two_leaf_cost_arrays[f]
+        two_leaf_soln_array[two_leaf_start_idx:two_leaf_start_idx + two_leaf_num_rows, :] = two_leaf_soln_arrays[f]
+
+        three_leaf_cost_array[three_leaf_start_idx:three_leaf_start_idx + three_leaf_num_rows, :-1] = three_leaf_cost_arrays[f]
+        three_leaf_soln_array[three_leaf_start_idx:three_leaf_start_idx + three_leaf_num_rows, :] = three_leaf_soln_arrays[f]
+        
+        four_leaf_cost_array[four_leaf_start_idx:four_leaf_start_idx + four_leaf_num_rows, :-1] = four_leaf_cost_arrays[f]
+        four_leaf_soln_array[four_leaf_start_idx:four_leaf_start_idx + four_leaf_num_rows, :] = four_leaf_soln_arrays[f]
+
+        two_leaf_start_idx += two_leaf_num_rows
+        three_leaf_start_idx += three_leaf_num_rows
+        four_leaf_start_idx += four_leaf_num_rows
+
+    two_leaf_cost_array, two_leaf_soln_array = filter(two_leaf_cost_array, two_leaf_soln_array, num_leaves_appended=True)
+    three_leaf_cost_array, three_leaf_soln_array = filter(three_leaf_cost_array, three_leaf_soln_array, num_leaves_appended=True)
+    four_leaf_cost_array, four_leaf_soln_array = filter(four_leaf_cost_array, four_leaf_soln_array, num_leaves_appended=True)
+
+    # Concatenate solns for each number of leaf nodes
+    cost_array = np.vstack((single_leaf_cost_array, two_leaf_cost_array, three_leaf_cost_array, four_leaf_cost_array))
+    soln_array = np.vstack((single_leaf_soln_array, two_leaf_soln_array, three_leaf_soln_array, four_leaf_soln_array))
+
+    # Filter before returning, may be solutions dominated by other solutions with smaller number of leaf nodes
+    return filter(cost_array, soln_array, num_leaves_appended=True)
+
+
+def opt_D2_subtree_worst_case(X,y,K_global,
+                              tree=None):
+    """Numpy based implementation of the D2S subroutine for
+
+    Returns a pareto front of optimal subtrees with |K| objectives for the classification scores of samples with
+    the |K| different classes and one extra objective for the number of leaf nodes
+
+    Args:
+        X: Data matrix
+        y: Target vector
+        tree: Optional instance of Tree class. If not provided a generic depth 2 tree will be created
+        alpha: Per leaf penalty on the classification score. MUST be specified in terms of number of samples
+
+    Returns:
+        Returns tuple (b,w,theta) which describes the optimal subtree solution. b is a tuple (parent, left_child, right_child)
+        where each holds the branch feature at the root node, left child, and right child respectively. If a node is cut off
+        (i.e. it or an ancestor is a leaf node) it takes a value of None. w is a variable length tuple with the predicted
+        class in each of the leaf nodes in where nodes are in ascending bfs ordering.  The correspondence between
+        prediction & node can be inferred from b. theta is a list of indices of the samples in the subtree which are
+        correctly classified in the optimal solution. N.B. these indices do not correspond to the full dataset
+    """
+
+    n_samples, n_features = X.shape
+    I, F_all = range(n_samples), range(n_features)
+
+    # Get unique classes in data and associate them to an index
+    # Need k_to_class_idx for when K != [0,1,...,|K|-1]
+    K = np.unique(y).tolist()
+    class_idx_to_k = K
+    k_to_class_idx = {k: i for i, k in enumerate(K)}
+
+    # If no tree is given create a generic depth 2 tree
+    if tree is None:
+        tree = Tree(2)
+    elif tree.depth != 2:
+        return None, None, None
+
+    F_map_to_all = F_all
+    F_mask = [True] * len(F_all)
+    F = F_all
+
+    # TODO: modify this to return the smallest subtree (i.e. make an arbitrary prediction in the subtree root)
+    # Subroutine will fail with no data supplied
+    if n_samples == 0:
+
+        return None, None
+
+        cost_array = np.zeros((1, len(K) + 1), dtype=np.int16)
+        cost_array[0,-1] = 1
+
+        soln_array = -1 * np.ones((1,10), dtype=np.int16)
+        soln_array[0,3] = 0
+
+        return cost_array, soln_array
+
+    # Cover special case of only one class in subtree
+    elif len(K) == 1:
+        cost_array = np.zeros((1, 2), dtype=np.int16)
+        cost_array[0,0] = n_samples
+        cost_array[0,1] = 1
+
+        soln_array = -1 * np.ones((1, 10), dtype=np.int16)
+        soln_array[0,3] = 0
+
+    else:
+    ############### BEGIN SUBROUTINE PROPER ###############
+
+        # TODO: Cut down on memory usage by using smaller ints?
+        FQ1 = np.zeros((len(K), len(F)), np.int16)
+        FQ11 = np.zeros((len(K), len(F), len(F)), np.int16)
+
+        # Track number of samples of each class in the subtree
+
+        _, D = np.unique(y, return_counts=True)
+        D = D.astype(np.int16)
+
+        for k in K:
+            # Technically collecting the frequency counters could be done without looping over K
+            # It's beyond me how to do it with numpy though
+
+            # Take the subarray of X in which all samples have class y^i = k and features are filtered by F_mask
+            X_masked = X[np.ix_(y==k,F_mask)]
+
+            k_idx = k_to_class_idx[k]
+
+            # Each column of X_masked is associated with feature f, and indicates which samples have x_f^i == 1
+            # Taking the dot product of columns associated with features f_a and f_b will be equal to the number of
+            # samples for which (x_fa^i == 1 AND x_fb^i == 1)
+            FQ11[k_idx,:,:] = X_masked.T @ X_masked
+
+            # The diagonal corresponds to duplicated features, i.e. x_fa^i == 1
+            FQ1[k_idx,:] = np.diag(FQ11[k_idx,:,:])
+
+        FQ0 = np.expand_dims(D,axis=1) - FQ1
+        FQ10 = np.expand_dims(FQ1,axis=2) - FQ11
+        FQ01 = np.expand_dims(FQ1,axis=1) - FQ11
+        FQ00 = np.expand_dims(FQ0,axis=2) - FQ01
+
+        # two_leaf_cost_array = build_two_leaf_costs(FQ0, FQ1)
+        cost_array, soln_array = build_nondominated_solutions(D, FQ0, FQ1, FQ00, FQ01, FQ10, FQ11)
+
+        # Subtract one from soln array to move back into 0 based indexing.
+        # Unused portions will now be -1 instead of 0. Note that the indexing on the classes is still
+        # local to the subtree, not all possible classes in the full dataset
+        soln_array = soln_array - 1
+
+    # Cost and solution arrays were calculated using only the samples classes in the subtree
+    # This is fine if all classes were present, otherwise we must convert to a global solution
+
+    if len(K) < len(K_global):
+        num_rows = cost_array.shape[0]
+        n_classes = cost_array.shape[1] - 1
+
+        cost_array_global = np.zeros((num_rows, len(K_global) + 1), dtype=cost_array.dtype)
+
+        for k_idx in range(n_classes):
+            k_global = class_idx_to_k[k_idx]
+
+            cost_array_global[:,k_global] = cost_array[:,k_idx]
+
+        cost_array_global[:,-1] = cost_array[:,-1]
+
+        condlist = [(soln_array[:,3:] == k_idx) for k_idx in range(n_classes)]
+        choicelist = [class_idx_to_k[k_idx] for k_idx in range(n_classes)]
+        soln_array[:,3:] = np.select(condlist, choicelist, -1)
+
+        return cost_array_global, soln_array
+
+    else:
+        return cost_array, soln_array
+
 def optimise_regularised_subtrees(X,y,tree,opts,branch_features,root_node,alpha,
                                   cache=None,weights=None,cat_feature_maps=None,num_feature_maps=None):
     """Optimises the tails of a given tree
@@ -2311,6 +2730,329 @@ def optimise_subtrees(X,y,samples_in_node,tree,opts,branch_features,
             theta[I_root[idx]] = 1
 
     return b,w,theta
+
+
+def optimise_subtrees_worst_case(X,y,tree,opts,branch_features,root_node,alpha,cache=None):
+    """Optimises the tails of a given tree
+
+    Function which runs solution polishing on a given decision tree. Works by finding nodes which are candidate subtree
+    roots for optimisation, calling the D2S subroutine on each, and then returning the updated tree
+
+    Args:
+        X (ndarray): 2d array of size (n_samples,n_features) with binary features
+        y (ndarray): 1d array of target classes. Classes assumed to be in {0,...,|K|-}
+        tree (Tree):
+        opts (set): Flags which can be set to modify behaviour. No options are current supported
+        branch_features:
+        root_node (Node): Root node which recursively defines a tree. Only used to find node heights
+        alpha (float): Per leaf penalty on accuracy
+        cache (dict): Cache for D2S subroutine. May be modified in place
+
+    Returns:
+        Returns a tuple (b,p,w,theta) where each element is a dictionary. Together these form a PARTIAL solution only for
+        the subtrees which have been optimised. These can be merged into an existing solution to update only the optimised
+        subtrees while leaving the upper levels of the tree untouched
+    """
+
+
+    # No Feature Reuse constraints not supported
+    assert ('No Feature Reuse' not in opts)
+
+    # TODO: Mixture of tree as recursive node structure and a class is awkward.
+    #  Should try and settle on one or combine them in a nice way
+
+    n_samples, n_features = X.shape
+    F = range(n_features)
+    K = np.unique(y).tolist()
+
+    # Double check that the tree is large enough
+    if tree.depth < 2:
+        return None, None, None, None
+
+    # The calculate_height method calculates the height recursively, populating node.height for the root node
+    # and all other nodes in the tree as needed to detect the correct subtree roots
+    root_node.calculate_height()
+
+    subtree_roots = []
+    to_explore = [root_node]
+
+    samples_in_node = {}
+
+    # Explore the tree and add nodes to the list of subtree roots if the following holds:
+    # The node.height <= 2 AND (node.n == 1 OR node.parent.height > 2)
+    while len(to_explore) > 0:
+        node = to_explore.pop()
+
+        samples_in_node[node.n] = node.I
+
+        if node.height <= 2:
+            if node.parent is None:
+                subtree_roots.append(node)
+            elif node.parent.height > 2:
+                subtree_roots.append(node)
+
+        # If node is a branch node add its children to the list of nodes to explore
+        if node.node_type == 'branch':
+            to_explore.append(node.left_child)
+            to_explore.append(node.right_child)
+
+    # Create b, p, w dictionaries for each subtree with a root in subtree_roots
+    b = {}
+    p = {}
+    w = {}
+
+    for root in subtree_roots:
+        if len(root.I) == 0:
+            return None, None, None, None
+
+    # Loop over the root of each subtree to be optimised, and set all decision variables to zero in the subtree to zero.
+    # Afterwards when the D2S subroutine is called we can simply update the decision variables which are non-zero
+    # in the optimal solution
+    for root in subtree_roots:
+        # At each subtree root we want the decision variables in the depth 2 subtree
+        n = root.n
+        # left_child, right_child = tree.left_child(n), tree.right_child(n)
+        # candidate_descendants = [n,
+        #                          left_child, right_child,
+        #                          tree.left_child(left_child), tree.left_child(right_child), tree.right_child(left_child), tree.right_child(right_child)]
+
+        candidate_descendants = tree.descendants(n)
+
+        for n in candidate_descendants:
+            for k in K:
+                w[k, n] = 0
+            p[n] = 0
+
+            if n in tree.B:
+                for f in F:
+                    b[n,f] = 0
+
+    theta = [0] * n_samples
+
+    # Alpha in the original objective is a penalty against the accuracy of the model
+    # Since the subroutine only has access to the data samples at the subtree root node, it cannot
+    # operate on the accuracy of the whole dataset
+    # As such we convert alpha to a penalty on the number of correctly classified samples
+    alpha_subroutine = X.shape[0] * alpha
+
+    subtree_pareto_fronts = {}
+    subtree_node_solns = {}
+
+
+
+    # Gather solution sets in each subtree root
+    for root in subtree_roots:
+        run_subroutine = True
+        I_root = root.I # Samples in the subtrees
+
+        if cache is not None:
+            assert isinstance(cache,dict)
+
+            root_ancestors = tree.ancestors(root.n, branch_dirs=True)
+
+            path_key = frozenset((branch_features[node], dir) for node, dir in root_ancestors.items())
+
+            # If we have already seen this subtree, reuse the results
+            if path_key in cache:
+                subtree_costs, subtree_solns = cache[path_key]
+                run_subroutine = False
+
+        # Only run if we did not find a solution in the cache
+        if run_subroutine:
+            subtree_costs, subtree_solns = opt_D2_subtree_worst_case(X[I_root,:], y[I_root], K)
+
+            if cache is not None:
+                cache[path_key] = subtree_costs, subtree_solns
+
+        if subtree_costs is None:
+            pass
+
+        num_rows = subtree_solns.shape[0]
+        subtree_soln_indices = np.zeros((num_rows, 2), dtype=np.int32)
+        subtree_soln_indices[:,0] = np.arange(num_rows)
+        subtree_soln_indices[:,1] = root.n
+
+        subtree_node_solns[root.n] = (subtree_solns, I_root)    # Store actual subtree solution and samples present in subtree
+        subtree_pareto_fronts[root.n] = (subtree_costs, subtree_soln_indices)
+
+    # IDEA: Work through list of subtree solution in descending order (in terms of subtree root index)
+    # TODO: Iterate using heap?
+
+    subtree_fronts_to_opt = {}
+
+    if len(subtree_pareto_fronts) == 1:
+        subtree_fronts_to_opt[1] = subtree_pareto_fronts[1]
+        del subtree_pareto_fronts[1]
+
+    num_roots = len(subtree_pareto_fronts)
+
+
+    while num_roots > 0:
+
+        # Find deepest subtree root and its sibling node
+        root1 = max(subtree_pareto_fronts.keys())
+        root2 = tree.sibling(root1)
+
+        if root2 is None:
+            pass
+
+        if root2 in subtree_fronts_to_opt:
+            # Means sibling node has too many solution in it to filter
+            # Do not merge the current node and add it to subtree roots to optimise over
+            subtree_fronts_to_opt[root1] = subtree_pareto_fronts[root1]
+            del subtree_pareto_fronts[root1]
+
+        else:
+            # We have two sets of subtree solutions which we can merge
+            cost1, soln1 = subtree_pareto_fronts[root1]
+            cost2, soln2 = subtree_pareto_fronts[root2]
+
+            cost_array, soln_array = merge(cost1, cost2,
+                                           soln1, soln2,
+                                           merge_style=1)
+
+            num_rows = cost_array.shape[0]
+
+            # If there are lots of solution, it's generally faster to simply calculate objective over all solutions than
+            # to filter out non-dominated. If the excess number of solutions is in the root node then this does not sacrifice
+            # optimality
+            if (tree.parent(root1) == 1) or (num_rows > 100000):
+                subtree_fronts_to_opt[tree.parent(root1)] = (cost_array, soln_array)
+            else:
+                # print(f'Starting to filter solution set with {cost_array.shape[0]} rows')
+                # start_time = time.time()
+                cost_array, soln_array = filter(cost_array, soln_array, num_leaves_appended=True)   # SLOW FOR LARGE COST ARRAY
+                # print(f'Finished filtering in {time.time() - start_time:.2f}s\n')
+
+                subtree_pareto_fronts[tree.parent(root1)] = (cost_array, soln_array)
+
+            del subtree_pareto_fronts[root1]
+            del subtree_pareto_fronts[root2]
+
+        num_roots = len(subtree_pareto_fronts)
+
+    # cost_array, soln_array = subtree_pareto_fronts[1]
+
+
+    # Iterate over solution sets in subtrees of interest. Usually this will be the entire pareto front of solutions in
+    # the root node, but we allow flexibility if the full set of non-dominated solution is too large to deal with
+    for n, (cost_array, soln_array) in subtree_fronts_to_opt.items():
+        y_subtree = y[samples_in_node[n]]
+        class_frequencies = (y_subtree.reshape((len(y_subtree), 1)) == np.asarray(K).reshape((1, len(K)))).sum(axis=0)
+        cost_array_float = cost_array.astype(float)
+        # cost_array_float[:,:len(K)] = cost_array_float[:,:len(K)] / class_frequencies
+
+        cost_array_float[:,:len(K)] = np.divide(cost_array_float[:,:len(K)],
+                                                class_frequencies,
+                                                out=np.ones_like(cost_array_float[:,:len(K)]),
+                                                where=(class_frequencies != 0))
+
+        objs = np.min(cost_array_float[:,:len(K)], axis=1) - alpha * cost_array_float[:,-1]
+
+        best_solns_idx = np.argmax(objs)
+        best_solns = soln_array[best_solns_idx]
+
+        # Iterate over the best solutions in each subtree and update the decision variables
+        for idx in range(len(best_solns) // 2):
+            start = 2 * idx
+
+            soln_idx = best_solns[start]
+            soln_subtree_root = best_solns[start + 1]
+
+            (subtree_soln_set, root_I) = subtree_node_solns[soln_subtree_root]
+
+            subtree_optimal_soln = subtree_soln_set[soln_idx]
+
+            # Get bfs ordering node numbers of the subtree
+            node0, node1 = tree.left_child(soln_subtree_root), tree.right_child(soln_subtree_root)
+            node00, node01 = tree.left_child(node0), tree.right_child(node0)
+            node10, node11 = tree.left_child(node1), tree.right_child(node1)
+
+            parent_feature = subtree_optimal_soln[0]
+            left_feature = subtree_optimal_soln[1]
+            right_feature = subtree_optimal_soln[2]
+
+            if parent_feature != -1:
+                b[soln_subtree_root, parent_feature] = 1
+
+            if left_feature != -1:
+                b[node0, left_feature] = 1
+
+            if right_feature != -1:
+                b[node1, right_feature] = 1
+
+            root_prediction = subtree_optimal_soln[3]
+            pred0 = subtree_optimal_soln[4]
+            pred1 = subtree_optimal_soln[5]
+            pred00 = subtree_optimal_soln[6]
+            pred01 = subtree_optimal_soln[7]
+            pred10 = subtree_optimal_soln[8]
+            pred11 = subtree_optimal_soln[9]
+
+            if root_prediction != -1:
+                p[soln_subtree_root] = 1
+                w[root_prediction, soln_subtree_root] = 1
+
+            if pred0 != -1:
+                p[node0] = 1
+                w[pred0, node0] = 1
+
+            if pred1 != -1:
+                p[node1] = 1
+                w[pred1, node1] = 1
+
+            if pred00 != -1:
+                p[node00] = 1
+                w[pred00, node00] = 1
+
+            if pred01 != -1:
+                p[node01] = 1
+                w[pred01, node01] = 1
+
+            if pred10 != -1:
+                p[node10] = 1
+                w[pred10, node10] = 1
+
+            if pred11 != -1:
+                p[node11] = 1
+                w[pred11, node11] = 1
+
+            # TODO: Rewrite without bruteforcing?
+            for i in root_I:
+                if parent_feature == -1:
+                    if y[i] == root_prediction:
+                        theta[i] = 1
+                else:
+                    if X[i, parent_feature] < 0.5:
+                        # paths left
+                        if left_feature == -1:
+                            # pred in left child (node 2)
+                            if y[i] == pred0:
+                                theta[i] = 1
+                        elif X[i, left_feature] < 0.5:
+                            # pred in node 4
+                            if y[i] == pred00:
+                                theta[i] = 1
+                        else:
+                            # pred in node 5
+                            if y[i] == pred01:
+                                theta[i] = 1
+                    else:
+                        # paths right
+                        if right_feature == -1:
+                            # pred in right child (node 3)
+                            if y[i] == pred1:
+                                theta[i] = 1
+                        elif X[i, right_feature] < 0.5:
+                            # pred in node 6
+                            if y[i] == pred10:
+                                theta[i] = 1
+                        else:
+                            # pred in node 7
+                            if y[i] == pred11:
+                                theta[i] = 1
+
+    return b,p,w,theta
 
 class Tree():
     def __init__(self,depth,root=1):

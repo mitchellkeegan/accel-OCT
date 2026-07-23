@@ -1,4 +1,4 @@
-fig_title = f'Path Bound Cutting Planes Variant Comparison'
+fig_title = f'Figure - Path Bound Cutting Planes Variant Comparison'
 
 PBCPBaseline_Model = {'Base Model': 'BendRegOCT',
                       'Model Name Override': 'BendOCT',
@@ -14,6 +14,12 @@ PBCPBaselineAll_Model = {'Base Model': 'BendRegOCT',
                                             'Path Bound Cutting Planes-Bound Structure': [True],
                                             'Solution Polishing-Enabled': [True]},
                          'Silent Filters': {'Path Bound Cutting Planes-Endpoint Only': [False]}}
+
+legend_kwargs = {'fontsize': 11,
+                 'ncol': 4,
+                 'loc': 'lower center',
+                 'columnspacing': 0.5,
+                 'bbox_to_anchor': (0.5125, 0.88)}
 
 models = [BendRegOCT_Model,
           PBCPBaseline_Model,

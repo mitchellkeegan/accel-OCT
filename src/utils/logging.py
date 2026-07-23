@@ -45,18 +45,25 @@ shorthand_dict = {'Encoding Scheme': 'ES',
                   'Cut Set Callback': 'cbCS',
                   'Cut Type': 'CT',
                   'Check Validity': 'CV',
+                  'Use Cache': 'CA',
                   'Endpoint Only': 'EO',
+                  'Check Violation': 'CV',
                   'Minimum Node Support': 'MNS',
                   'EQP Initial Cuts': 'EQP',
                   'H Variant': 'HV',
-                  'Enhanced Cuts': 'EC'}
+                  'Enhanced Cuts': 'EC',
+                  'Filter Dominated': 'FD',
+                  'Beta Dependence': 'BD'}
 
-def get_shorthand(name):
+def get_shorthand(name, shorthand_dict_user=None):
     """Wrapper for shorthand_dict which better handle booleans"""
     if isinstance(name, bool):
         return 'T' if name else 'F'
     else:
-        return shorthand_dict.get(name, name)
+        if shorthand_dict_user is None:
+            return shorthand_dict.get(name, name)
+        else:
+            shorthand_dict_user.get(name, name)
 
 # Maps error codes to error information
 error_code_to_error = {0: 'Model Solve Failed',
@@ -94,6 +101,7 @@ error_code_to_error = {0: 'Model Solve Failed',
                        155: 'Error in user defined save_model_output method on OCT class',
                        156: '_check_output_validity method on OCT class not implemented',
                        157: 'Error in user defined _check_output_validity method on OCT class',
+                       158: 'Error encountered while writing debug information to file',
                        190: 'Result successfully saved to .csv file',
                        199: 'Generic Warning'}
 
@@ -170,7 +178,6 @@ def _logged_results(OCTModel):
     Returns:
         Returns the dictionary logged_results which contains column names and row values
     """
-
 
     model = OCTModel.get_gurobi_model()
 

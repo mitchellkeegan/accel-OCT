@@ -1,4 +1,4 @@
-tablename = f'Solution Polishing Table'
+tablename = f'Table - Solution Polishing Table'
 
 BendOCT_Model = {'Base Model': 'BendRegOCT',
                  'Experiment Name': 'Baseline',

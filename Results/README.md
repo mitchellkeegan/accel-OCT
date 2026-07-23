@@ -1,5 +1,5 @@
 Paper results are stored in `BendRegOCT/ExperimentName/ExperimentName.csv`. Only the raw csv results are included, 
-logs for each experiment can be made available if requested. EQP initial cut results also a have padded version, which are
+logs for each experiment can be made available if requested. EQP initial cut results may also a have padded version, which are
 used for plotting results over all datasets, not just those for which each maximum split set size has a marginal benefit.
 The most important columns are:
 

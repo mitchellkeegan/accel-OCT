@@ -1,6 +1,6 @@
 """Helper script for creating tables to compare experiment results
 
-Creates a LaTeX table with aggregated per dataset results. By default tabulates number of isntances solves to optimality,
+Creates a LaTeX table with aggregated per dataset results. By default tabulates number of instances solves to optimality,
 average solve time in solved instances, and average optimality gap in unsolved instances. Users must set the range of depths,
 lambda values and encoding schemes to aggregate over. Per instance results can be viewed by constraining the depth and
 lambda filters to one value, and choosing a single encoding scheme.
@@ -10,24 +10,26 @@ which can then be wrapped in a table environment as needed.
 
 To use, set up a list of dictionaries each defining a table column. The following keys are available:
     Base Model: The MIP model which we search for results on
-    Experiment Name : Name of the experiments (csv file should be Results/BaseModel/ExperimentName/ExperimentName.csv)
+    Model Name Override:
+    Experiment Name: Name of the experiments (csv file should be Results/BaseModel/ExperimentName/ExperimentName.csv)
     Column Name: Name of the column in the table
     Suffix: Suffix added to results filename. Mostly used for padded EQP results
     Filters: See below
 
-Filters are dictionaries where the keys correspond to columns of the results csv file and the values are lists of
+Filters are dictionaries where the keys correspond to columsn of the results csv file and the values are lists of
 settings. Any rows which do not match the filters are filtered out. The script expects that the filter for each column
 with take a subset of the data with one instance per dataset (two per numerical dataset). If this is not the case an error
 will be thrown.
 
-Settings used to generate tables in paper can be found in Results/Tables/Settings
-
+The script will print out how many instances it has aggregated results over for each dataset. This should be checked to
+ensure the expected results are being tabulated
 """
 
 import os
 
 import pandas as pd
 
+from src.models.BendRegOCT import BendRegOCT
 from src.utils.data import valid_datasets
 
 # Crude way to order the datasets in the table
@@ -65,57 +67,73 @@ dataset_ordering = {'soybean-small': 0,
                     'seismic-bumps': 31,
                     'ann-thyroid': 32}
 
+def dataset_type(dataset):
+    if dataset in valid_datasets['categorical']:
+        return 1
+    elif dataset in valid_datasets['numerical']:
+        return 2
+    elif dataset in valid_datasets['mixed']:
+        return 3
+    else:
+        return None
+
+create_pdf = False       # Set to True to automatically generate a pdf from the raw tex file
+sideways_table = False   # Set to True to make table sideways in pdf (uses the rotating package)
+latex_filepath = 'pdflatex.exe'
+
 dataset_filter = None
 encoding_filter = None  # Valid filters are 'QB_5' and 'QT_5' for numerical encodings, or 'cat' for categorical datasets
 depth_filter = None
 lambda_filter = None
 
 dataset_filter = valid_datasets['categorical'] + valid_datasets['numerical'] + valid_datasets['mixed']
-
-
-
 depth_filter = [3,4]
 lambda_filter = [0.08, 0.06, 0.04, 0.02, 0.01,
-           0.008, 0.006, 0.004, 0.002, 0.001,
-           0.0008, 0.0006, 0.0004, 0.0002, 0.0001]
-encoding_filter = ['cat','QB_5', 'QT_5']
-
-
-# # Uncomment to filter down to per-instance results
-# depth_filter = [3]
-# lambda_filter = [0.004]
-# encoding_filter = ['cat','QB_5']
+                 0.008, 0.006, 0.004, 0.002, 0.001,
+                 0.0008, 0.0006, 0.0004, 0.0002, 0.0001]
+encoding_filter = ['cat', 'QB_5', 'QT_5']
 
 base_dir = os.getcwd()
 
 # If doing general comparison then write the table name and directory here
-table_dir = os.path.join('../../Results', 'Tables')
+tablename = f'Table - Ablation Comparison'
+table_dir = os.path.join('..',
+                         '..',
+                         'Results',
+                         'Tables')
 
-tablename = f'Table - Main Results'
-
-BendOCT_Model = {'Base Model': 'BendRegOCT',
+BendRegOCT_Model = {'Base Model': 'BendRegOCT',
                  'Experiment Name': 'Baseline',
                  'Column Name': 'BendersOCT',
                  'Filters': {}}
 
-All_Model = {'Base Model': 'BendRegOCT',
-                 'Column Name': 'Accelerated BendersOCT',
+Ablation_Model = {'Base Model': 'BendRegOCT',
+                 'Column Name': 'All',
                  'Experiment Name': 'Ablation',
                  'Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [True],
                                  'Solution Polishing-Enabled':[True],
                                  'Benders Cuts-Enhanced Cuts':[True]}}
 
+MinusEC_Model = {'Base Model': 'BendRegOCT',
+                 'Column Name': 'All - EC',
+                 'Experiment Name': 'Ablation',
+                 'Filters': {'EQP Initial Cuts-Enabled': [True],
+                                 'Path Bound Cutting Planes-Enabled': [True],
+                                 'Solution Polishing-Enabled':[True],
+                                 'Benders Cuts-Enhanced Cuts':[False]}}
+
 MinusPBCP_Model = {'Base Model': 'BendRegOCT',
-                  'Column Name': 'Accelerated (No PBCP)',
-             'Experiment Name': 'Ablation',
-             'Filters': {'EQP Initial Cuts-Enabled': [True],
+                 'Column Name': 'All - PBCP',
+                 'Experiment Name': 'Ablation',
+                 'Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [False],
                                  'Solution Polishing-Enabled':[True],
                                  'Benders Cuts-Enhanced Cuts':[True]}}
 
-models = [BendOCT_Model,
-          All_Model,
+models = [BendRegOCT_Model,
+          Ablation_Model,
+          MinusEC_Model,
           MinusPBCP_Model]
 
 def get_encoding_name(series):
@@ -134,7 +152,8 @@ for model in models:
     suffix = model.get('Suffix', '')
     extra_tag = model.get('Tag', '')
     model['Filename'] = ''.join(model['Experiment Name'].split())
-    model['File Base'] = os.path.join('..', '..',
+    model['File Base'] = os.path.join('..',
+                                      '..',
                                       'Results',
                                       model['Base Model'],
                                       model['Filename'])
@@ -178,11 +197,6 @@ for model in models:
                 b &= (df[name] == condition)
 
     df = df.loc[b].reset_index()
-
-
-
-    # Create a new column describing the encoding scheme
-    # df['EncodingScheme'] = df['Encoding'] + '_' + df['Buckets']
 
     model['df'] = df
 
@@ -241,16 +255,14 @@ with open(os.path.join(table_dir, tablename + '.tex'),'w') as f:
 
     for dataset in sorted(dataset_filter,key=lambda x: dataset_ordering[x]):
 
-        if dataset == 'car_evaluation':
-            dataset_name = 'car\\_evaluation'
-        else:
-            dataset_name = dataset
-
         # Add lines between different types of datasets
-        if dataset == 'iris' and prev_dataset == 'kr-vs-kp':
+        if dataset_type(dataset) != dataset_type(prev_dataset):
             f.write(hline())
-        elif dataset == 'hepatitis' and prev_dataset in ['kr-vs-kp', 'spambase']:
-            f.write(hline())
+
+        dataset_name = dataset
+
+        if dataset_name == 'car_evaluation':
+            dataset_name = 'car\\_evaluation'
 
         line = [dataset_name]
 
@@ -267,7 +279,7 @@ with open(os.path.join(table_dir, tablename + '.tex'),'w') as f:
 
             assert num_rows_expected == len(df_f)
 
-            print(f'Results for {dataset} aggregated over {num_rows_expected} instances')
+            print(f'Results for {dataset} aggregated over {num_rows_expected} instances in {model['Column Name']} column')
 
             solved_rows = df_f[df_f['Model Status'] == 2]
             unsolved_rows = df_f[df_f['Model Status'] == 9]
@@ -354,3 +366,32 @@ with open(os.path.join(table_dir, tablename + '.tex'),'w') as f:
 
     f.write(postamble(tablename))
 
+
+
+os.chdir(table_dir)
+tablename_no_spaces = tablename.replace(' ','_')
+with open(tablename_no_spaces + '_pdf.tex', 'w') as f:
+    f.write('\\documentclass{article}\n\n')
+    f.write('\\usepackage{multirow}\n\n')
+    if sideways_table:
+        f.write('\\usepackage{rotating}\n\n')
+
+    f.write('\\begin{document}\n\n')
+
+    if sideways_table:
+        f.write('\\begin{sidewaystable}\n')
+    else:
+        f.write('\\begin{table}\n')
+
+    f.write('\t\\centering\n')
+    f.write(f'\t\\input{{{tablename + '.tex'}}}\n')
+
+    if sideways_table:
+        f.write('\\end{sidewaystable}\n\n')
+    else:
+        f.write('\\end{table}\n\n')
+
+    f.write('\\end{document}')
+
+if create_pdf:
+    os.system(rf'{latex_filepath} -aux-directory=AuxFiles {tablename_no_spaces + '_pdf.tex'}')

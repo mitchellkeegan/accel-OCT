@@ -1,9 +1,9 @@
-fig_title = f'Ablation Test'
+fig_title = f'Figure - Ablation Test'
 
 All_Model = {'Base Model': 'BendRegOCT',
              'Model Name Override': 'BendOCT',
              'Feature Name': 'Ablation',
-             'Tag': '*+ All',
+             'Tag': '*All',
              'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [True],
                                  'Solution Polishing-Enabled':[True],
@@ -11,17 +11,16 @@ All_Model = {'Base Model': 'BendRegOCT',
 
 MinusEQP_Model = {'Base Model': 'BendRegOCT',
                   'Model Name Override': 'BendOCT',
-                  'Tag': '*- EQP',
+                  'Tag': '*All - EQP',
              'Feature Name': 'Ablation',
              'Silent Filters': {'EQP Initial Cuts-Enabled': [False],
                                  'Path Bound Cutting Planes-Enabled': [True],
-
                                  'Solution Polishing-Enabled':[True],
                                  'Benders Cuts-Enhanced Cuts':[True]}}
 
 MinusEC_Model = {'Base Model': 'BendRegOCT',
                   'Model Name Override': 'BendOCT',
-                 'Tag': '*- EC',
+                 'Tag': '*All - MC',
              'Feature Name': 'Ablation',
              'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [True],
@@ -30,7 +29,7 @@ MinusEC_Model = {'Base Model': 'BendRegOCT',
 
 MinusPBCP_Model = {'Base Model': 'BendRegOCT',
                   'Model Name Override': 'BendOCT',
-                   'Tag': '*- PBCP',
+                   'Tag': '*All - PBCP',
              'Feature Name': 'Ablation',
              'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [False],
@@ -39,16 +38,21 @@ MinusPBCP_Model = {'Base Model': 'BendRegOCT',
 
 MinusSP_Model = {'Base Model': 'BendRegOCT',
                   'Model Name Override': 'BendOCT',
-                 'Tag': '*- SP',
+                 'Tag': '*All - SP',
              'Feature Name': 'Ablation',
              'Silent Filters': {'EQP Initial Cuts-Enabled': [True],
                                  'Path Bound Cutting Planes-Enabled': [True],
                                  'Solution Polishing-Enabled':[False],
                                  'Benders Cuts-Enhanced Cuts':[True]}}
 
+legend_kwargs = {'fontsize': 11,
+                 'ncol': 3,
+                 'loc': 'lower center',
+                 'bbox_to_anchor': (0.5125, 0.88)}
+
 models = [BendRegOCT_Model,
+          All_Model,
           MinusSP_Model,
           MinusEC_Model,
           MinusEQP_Model,
-          MinusPBCP_Model,
-          All_Model]
+          MinusPBCP_Model]

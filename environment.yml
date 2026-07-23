@@ -10,4 +10,5 @@ dependencies:
   - numpy=2.2.4
   - matplotlib=3.10.0
   - pip
+  - numba=0.63.1
   - conda-forge::filelock

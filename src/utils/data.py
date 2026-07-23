@@ -33,6 +33,10 @@ compressible_datasets = ['breast-cancer', 'car_evaluation', 'hayes-roth', 'house
 
 SplitOCT_datasets = ['breast-cancer', 'hayes-roth', 'house-votes-84', 'monk1', 'monk2', 'monk3', 'soybean-small', 'spect']
 
+imbalanced_datasets = ['breast-cancer', 'balance-scale', 'spect', 'car_evaluation', 'wpbc', 'transfusion', 'ozone-one', 'thoracic', 'seismic-bumps', 'ann-thyroid']
+imbalanced_datasets_with_eqp_sets = ['breast-cancer', 'balance-scale', 'spect', 'car_evaluation',
+                                     'transfusion', 'thoracic', 'seismic-bumps', 'ann-thyroid']
+
 eqp0_datasets = ['breast-cancer', 'car_evaluation', 'hayes-roth', 'spect',
                  'iris_QB_5', 'banknote_QB_5','ILPD_QB_5', 'transfusion_QB_5', 'biodeg_QB_5', 'segmentation_QB_5', 'spambase_QB_5',
                  'iris_QT_5', 'banknote_QT_5','ILPD_QT_5', 'transfusion_QT_5', 'biodeg_QT_5', 'segmentation_QT_5', 'spambase_QT_5',
@@ -57,6 +61,8 @@ valid_datasets = {'all': all_datasets,
                   'numerical': numerical_datasets,
                   'mixed': mixed_datasets,
                   'compressible': compressible_datasets,
+                  'imbalanced': imbalanced_datasets,
+                  'imbalanced eqp': imbalanced_datasets_with_eqp_sets,
                   'eqp': {0: eqp0_datasets,
                           1: eqp1_datasets,
                           2: eqp2_datasets}
@@ -544,7 +550,7 @@ def load_instance(dataset,
             info string (string): String which is printed by the OCT class when the dataset is loaded in. Contains general info about dataset
             encoding (str or None): Same as load_instance inputs
             num_buckets (int or None): Same as load_instance inputs
-
+            
 
         The dictionary also needs the following set for compatibility:
             compressed = False
@@ -682,11 +688,17 @@ def load_instance(dataset,
     I, F, K, info = Dataset_Info(X, y, aux_info)
     # print(info)
 
+    # Get subset of samples which have each target class
+    I_k = {k: [i for i in I if y[i] == k]
+           for k in K}
+
+
     instance_data = {'X': X,
                      'y': y,
                      'Xf': Xf,
                      'yf': yf,
                      'I': I,
+                     'I_k': I_k,
                      'I_np': np.asarray(I),
                      'F': F,
                      'K': K,
@@ -731,3 +743,152 @@ def Dataset_Info(X,y,aux_info):
     info += f'Average Sparsity: {sum(feature_sparsity)/len(feature_sparsity):.2f}\n'
 
     return I, F, K, info
+
+def load_strengthened_cuts_pathological_instance():
+
+    debug_file = r'C:\Users\n12268186\Documents\PhD Projects\OptimalTrees\Results\BendRegOCT\EnhancedCutsDebugV2\wdbc_QB_5\d=3 l=0.02 SubID=0 WS=T PolWS=T EC-Rw=True\debug_output.pickle'
+
+    # load_instance('wdbc',
+    #               num_buckets=5,
+    #               encoding_scheme='Quantile Buckets')
+
+    with open(debug_file, 'rb') as f:
+        saved_info = pickle.load(f)
+
+    b = saved_info['b']
+    p = saved_info['p']
+
+    data = saved_info['data']
+
+    X, y = data['X'], data['y']
+    F = data['F']
+    I = data['I']
+    K = data['K']
+
+    from src.utils.trees import Tree
+
+    max_depth = 3
+    tree = Tree(3)
+
+    node_branch_features = {}
+    leaf_sample_lists = {}
+
+    for i in I:
+        current_node = 1
+        sample = X[i, :]
+
+        while p[current_node] < 0.5:
+
+            if current_node not in node_branch_features:
+                for f in F:
+                    if b[current_node, f] > 0.9:
+                        node_branch_features[current_node] = f
+                        break
+
+            branch_feature = node_branch_features[current_node]
+
+            if sample[branch_feature] > 0.5:
+                current_node = tree.right_child(current_node)
+            else:
+                current_node = tree.left_child(current_node)
+
+        if current_node not in leaf_sample_lists:
+            leaf_sample_lists[current_node] = []
+
+        leaf_sample_lists[current_node].append(i)
+
+    debug_samples = leaf_sample_lists[10] + leaf_sample_lists[11]
+    debug_branch_node = node_branch_features[5]
+
+    X = X[debug_samples,:]
+    F = F
+
+    # X = X[:, [debug_branch_node]]
+    # F = range(1)
+
+    data = {'X': X,
+            'y': y[debug_samples],
+            'I': range(len(debug_samples)),
+            'F': F,
+            'K': K,
+            'compressed': False,
+            'name': 'wdbc-debug-data',
+            'encoded name': 'wdbc-debug-data',
+            'Categorical Feature Map': [],
+            'Numerical Feature Map': [],
+            'encoding': 'Quantile Buckets',
+            'number buckets': 5}
+
+    return data
+
+def load_toy_instance():
+    """Convenience function to create toy datasets for testing/debugging
+
+    Returns:
+
+    """
+
+    X = np.asarray([[0],
+                    [0],
+                    [1],
+                    [1]])
+
+    y = np.asarray([0,1,0,1])
+
+
+    data = {'X': X,
+            'y': y,
+            'I': range(4),
+            'F': range(1),
+            'K': [0,1],
+            'compressed': False,
+            'name': 'toy-data',
+            'encoded name': 'toy-data',
+            'Categorical Feature Map': [],
+            'Numerical Feature Map': [],
+            'encoding': None,
+            'number buckets': None}
+
+    return data
+
+def load_toy_eqp_instance(index=1):
+    """Convenience function to create toy datasets for testing/debugging
+
+    Returns:
+
+    """
+    if index == 1:
+        X = np.asarray([[0,0],
+                        [1,0],
+                        [0,1],
+                        [1,1]])
+
+        y = np.asarray([0, 1, 2, 3])
+
+    elif index == 2:
+        X = np.asarray([[0, 0, 0],
+                        [1, 0, 0],
+                        [0, 1, 0],
+                        [1, 1, 0],
+                        [1, 1, 1]])
+
+        y = np.asarray([0, 1, 2, 3, 4])
+
+    else:
+        print(f'ERROR: index={index} is not a valid argument')
+        return None
+
+    data = {'X': X,
+            'y': y,
+            'I': range(X.shape[0]),
+            'F': range(X.shape[1]),
+            'K': sorted(np.unique(y)),
+            'compressed': False,
+            'name': 'toy-data',
+            'encoded name': 'toy-data',
+            'Categorical Feature Map': [],
+            'Numerical Feature Map': [],
+            'encoding': None,
+            'number buckets': None}
+
+    return data

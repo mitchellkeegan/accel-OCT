@@ -1,5 +1,3 @@
-"""Implements classes for regularised FlowOCT"""
-
 import time
 
 from src.utils.logging import log_error

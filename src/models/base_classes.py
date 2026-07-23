@@ -11,7 +11,7 @@ from datetime import datetime
 from gurobipy import *
 
 from src.utils.trees import Tree
-from src.utils.logging import logger, log_error, shorthand_dict, get_shorthand
+from src.utils.logging import logger, log_error, get_shorthand
 
 def _merge_settings(base_default_settings, default_settings, user_settings):
     """Merge dictionaries of setting together in order of precedence user_settings > default_settings > base_default_settings
@@ -227,8 +227,6 @@ class CallbackSubroutine(ABC):
     default_priority = 10
 
     def __init__(self, default_settings=None, user_opts=None):
-
-
 
         self.stats = {'Num': 0,
                       'Time': 0}
@@ -571,6 +569,9 @@ class GenCallback(ABC):
                                       'Final Root Relaxation - Time': None,
                                       'Final Root Relaxation - Work': None}
 
+        # Flag which is available to subroutines which can be used to terminate the optimisation
+        self.terminate_opt = False
+
         def callback(model, where):
 
             # Wipe the temporary callback cache before the next run through the subroutines
@@ -597,6 +598,10 @@ class GenCallback(ABC):
                         self.relaxation_statistics['Presolve Relaxation - Time'] = model.cbGet(GRB.Callback.RUNTIME)
                         self.relaxation_statistics['Presolve Relaxation - Work'] = model.cbGet(GRB.Callback.WORK)
                         self.root_node_accessed = True
+
+            if self.terminate_opt:
+                model.terminate()
+                return
 
             for subroutine in self.subroutines:
                 if subroutine.opts['Enabled']:
@@ -855,158 +860,11 @@ class InitialCutManager(ABC):
 
         return log_printout, logged_results
 
-class OCT(ABC):
-    """Base class for optimal classification tree models
-
-    Provides various functions for settings up Gurobi models, training, logging, and post processing the model.
-
-    For a user subclassing the base class, the following are the minimal methods which must be implemented:
-        add_vars: Add decision variables to Gurobi model
-        add_constraints: Add constraints to Gurobi model
-        add_objective: Define the objective of the Gurobi model
-
-
-    The following methods are optional but recommended:
-        warm_start: Provide a warm start solution to the model
-        vars_to_readable: Convert the decision variables from the optimised model to a readable format
-        save_model_output: Save decision vars in readable format to file
-        summarise_tree_info: Create a log output with information about the optimised solution
-        _check_output_validity: Confirm the feasibility of the optimised solution
-
-
-    The Gurobi model object has many attributes on it. data should be accessed by model_data. add_vars should attach
-    the decision variables as model._variables, and then add_constraints and add_objective should access the variables
-    via the model object. model also has an opts attribute, this is a set which can be used to specify functionality/options
-    E.g. to specify constraints that heuristic solutions must follow
-
-
-    The user defined settings are split into opt_params and gurobi_params. gurobi_params allows the user to set Gurobi
-    parameters, see gurobi_params_base_default in __init__ method for currently implemented options
-
-
-    opt_params is a dictionary with the following options:
-        Warmstart (bool): Enable warmstarting the solution
-        Polish Warmstart (bool): Enable solution polishing of warmstart solution
-        Base Directory (str): Base directory for project. By default set relative to location of base_classes.py
-        Results Directory (str): Name of results directory. This is the name of the experiment
-        Compare Relaxations (bool): Enable to log various relaxation statistics (Note that this stops the optimisation after the root node)
-        depth: (int): Maximum depth of tree to optimise over
-        lambda (float): Regularisation parameter lambda. Set to None for variants without regularisation
-        Use Baseline (bool): Ignore check on usefullness of callback subroutines/initial cuts. Must be set to True for baseline model
-        Callback (dict): Dict of dicts, each key is the name of a callback subroutine with associated value being a dictionary of settings
-        Initial Cuts (dict): Same structure as Callback settings dict
-
-    The subclass __init__ should look something like:
-
-        class OCTSubclass(OCT):
-            def __init__(self, opt_params, gurobi_params):
-                super().__init__(opt_params, gurobi_params, callback_generator=MyCallbackGenerator, cut_manager=MyInitialCutManager)
-                self.model_type = 'OCTSubclass'
-
-    Attributes:
-        model_type: The name of the model. Must be set in __init__ AFTER call to super.__init__
-        model: The Gurobi model object
-        cut_manager: The initial cut manager
-        callback_generator:
-        GurobiLogFile: The name of the Gurobi log file
-        stats: Dict storing statistics for logging. Currently only used for logging warmstart statistics
-        _model_trained: False by default, only set to true after optimisation with feasible solution returned
-
-    """
+class LoggingMixin():
 
     GurobiLogFile = ''
-    _model_trained = False
     stats = {}
-
-    def __init__(self,
-                 user_opt_params,
-                 user_gurobi_params,
-                 opt_params_defaults=None,
-                 gurobi_params_defaults=None,
-                 callback_generator=None,
-                 cut_manager=None):
-
-        """ Base initialisation for OCT models
-
-        Handles parameter initialisation for Gurobi, OCT model, initial cuts and callback
-
-        To use __init__ method when inheriting from this class, use super.__init__ and pass in
-        the arguments described below in Args. self.model_type must be set AFTER calling super.__init__
-        or else the default name will be taken
-
-        Alternatively, subclass __init__ can handle functionality by itself.
-        It must do the following:
-            Set the name of the model in self.model_type
-            Set self.opt_params to be a dictionary of optimisation params (See below defaults which must be set)
-            Set self.gurobi_params to be a dictionary of gurobi params (See below defaults which must be set)
-            Set self.callback_generator with an instance of GenCallback
-            Set self.initial_cuts with a dict
-
-        Args:
-            user_opt_params (dict): Opt params passed by user
-            user_gurobi_params (dict): Gurobi params passed by user
-            opt_params_defaults (dict): Default opt params optionally set by subclass
-            gurobi_params_defaults (dict): Default gurobi params optionally set by subclass
-            callback_generator (GenCallback): Optional callback generator provided by subclass
-            available_cuts (dict[str:InitialCut]): Optional dict of available cut.
-                                                   Key should be the name of cut and value should be a subclass of InitialCut
-        """
-
-
-        self.model_type = 'OCTBase'
-
-        opt_params_base_default = {'Warmstart': True,
-                                   'Polish Warmstart': True,
-                                   'Base Directory': os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                                   'Results Directory': 'Test Folder',
-                                   'Compare Relaxations': False,
-                                   'depth': 3,
-                                   'lambda': None,
-                                   'Use Baseline': False,
-                                   'Subjob id': None,
-                                   'Array Job id': None,
-                                   'Debug Mode': False}
-
-        gurobi_params_base_default = {'TimeLimit': 3600,
-                                      'Threads': 1,
-                                      'MIPGap': 0,
-                                      'MIPFocus': 0,
-                                      'Heuristics': 0.05,
-                                      'NodeMethod': -1,
-                                      'Method': -1,
-                                      'Seed': 0,
-                                      'LogToConsole': 0,
-                                      'LogToFile': True,
-                                      'NodeLimit': float('inf')}
-
-        # Keep track of which settings have been explicitly set by the user to create the log directory
-        self.user_params = user_opt_params | user_gurobi_params
-
-        # Create the opt_params and gurobi_params dict by merging in default and user settings
-        self.opt_params = _merge_settings(opt_params_base_default, opt_params_defaults, user_opt_params)
-        self.gurobi_params = _merge_settings(gurobi_params_base_default, gurobi_params_defaults, user_gurobi_params)
-
-        # Initialise the cut manager with the initial cut settings
-        if cut_manager is None:
-            self.cut_manager = InitialCutManager([], {})
-        else:
-            cut_settings = self.opt_params.get('Initial Cuts',{})
-            self.cut_manager = cut_manager(cut_settings)
-
-        # Initialise the callback generator with the callback settings
-        if callback_generator is None:
-            self.callback_generator = GenCallback([],{})
-        else:
-            callback_settings = self.opt_params.get('Callback',{})
-            self.callback_generator = callback_generator(callback_settings)
-
-        # Get true callback settings from the callback generator
-        # This should be the result of merging in user callback settings into the default settings on each subroutine
-        self.opt_params['Callback'] = self.callback_generator.callback_settings
-
-        # Get true initial cut settings from the initial cut manager
-        # This should be the result of merging in user initial cut settings into the default settings on each subroutine
-        self.opt_params['Initial Cuts'] = self.cut_manager.cut_settings
+    results_to_log = {}
 
     def update_model_stats(self, feature_name, num_added, time_added, *args):
         """Helper function to keep track of statistics for model building
@@ -1033,315 +891,6 @@ class OCT(ABC):
         for arg in args:
             k, v = arg
             self.stats[feature_name][k] += v
-
-    def create_model(self):
-        """Create Gurobi model object
-
-        Sets Gurobi model parameters based on self.gurobi_params
-        Also Sets up the Gurobi logfile from the string in self.GurobiLogFile
-        By default this will be the empty string '', to use the Gurobi logfile it must be set before create_model is called
-        this happens automatically if using the fit method
-
-        Returns:
-            Return the created Gurobi model object
-        """
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model entering create_model() at {time_now}')
-
-        model = Model()
-
-        model.Params.LogToConsole = 0
-
-        if self.gurobi_params['LogToFile']:
-
-            # By default, the file location will be an empty string.
-            # Need to set using self._set_gurobi_logfile(), will be done automatically done if using self.fit()
-            model.params.LogFile = self.GurobiLogFile
-
-            # Clear out the logfile if it already exists
-            if os.path.exists(model.params.LogFile):
-                open(model.params.LogFile, 'w').close()
-
-        model.Params.MIPGap = self.gurobi_params['MIPGap']
-        model.Params.MIPFocus = self.gurobi_params['MIPFocus']
-        model.Params.Heuristics = self.gurobi_params['Heuristics']
-        model.Params.TimeLimit = self.gurobi_params['TimeLimit']
-        model.Params.Threads = self.gurobi_params['Threads']
-        model.Params.Method = self.gurobi_params['Method']
-        model.Params.NodeMethod = self.gurobi_params['NodeMethod']
-        model.Params.Seed = self.gurobi_params['Seed']
-        model.Params.NodeLimit = self.gurobi_params['NodeLimit']
-        model.Params.LogToConsole = self.gurobi_params['LogToConsole']
-
-        model._opts = set()     # Set of options which can be set as flags to modify subroutine behaviour
-        model._model_name = self.model_type
-
-        # Do this to ensure that we can access params before we optimise the model (sometimes needed for initial cuts)
-        model.update()
-
-        return model
-
-    def build_model(self,model):
-        """Run through methods to construct model
-
-        Args:
-            model (grbModel): Gurobi model to add vars, constraints, etc... to
-
-        """
-
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model entering build_model() at {time_now}')
-
-        self.add_vars(model)
-        self.add_constraints(model)
-        self.add_objective(model)
-        self._add_initial_cuts(model)
-        self.callback_generator.update_model(model)
-
-    def fit(self, data):
-        """Fits optimal classification tree given dataset.
-
-        Does the following:
-            Creates the gurobi model object
-            Sets up logging (gurobi and user logfiles)
-            Checks if the settings provided are 1) valid and 2) provide a benefit compared to the baseline.
-            Calls _build_model to add variables, constraints, objective, etc...
-            Runs warmstart if requested
-            Optimises the model
-            Check that a feasible solution was found
-
-        Args:
-            data (dict): Dictionary containing dataset. At a minimum should contain 'X', 'y', 'name', 'encoded name' entries
-        """
-
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model entering fit() at {time_now}')
-
-        opt_params = self.opt_params
-        
-        self._setup_logging(data)
-
-        # Validate the callback and initial cut settings
-        callback_settings_valid, callback_valid_log_messages = self.callback_generator.valid_settings(model_opts=opt_params, data=data)
-        cut_settings_valid, cut_valid_log_messages = self.cut_manager.valid_settings(model_opts=opt_params, data=data)
-        
-        # Check if there are any useful callback or initial cut settings
-        if opt_params['Use Baseline']:
-            # 'Use Baseline' disables usefulness checks. Required if running baseline models without any initial cuts/callback subroutines
-            callback_settings_useful, callback_useful_log_messages = True, None
-            cut_settings_useful, cut_useful_log_messages = True, None
-        else:
-            callback_settings_useful, callback_useful_log_messages = self.callback_generator.useful_settings(model_opts=opt_params, data=data)
-            cut_settings_useful, cut_useful_log_messages = self.cut_manager.useful_settings(model_opts=opt_params,data=data)
-        
-        all_settings_valid = callback_settings_valid and cut_settings_valid
-        some_settings_useful = cut_settings_useful or callback_settings_useful    
-        
-        # Raise errors and warnings
-        if not callback_settings_valid:
-            log_error(10, callback_valid_log_messages)
-        if not cut_settings_valid:
-            log_error(11, cut_valid_log_messages)
-        if not callback_settings_useful:
-            log_error(110, callback_useful_log_messages)
-        if not cut_settings_useful:
-            log_error(111, cut_useful_log_messages)
-        
-        if not (all_settings_valid and some_settings_useful):
-            if not some_settings_useful:
-                log_error(12)
-            return False
-
-        model_build_start_time = time.time()
-
-        # Create the gurobi model. If it fails log an error and exit
-        # Should pick up if a licence isn't available
-        try:
-            model = self.create_model()
-        except GurobiError as err:
-            try:
-                log_error(23, err.message)
-            except:
-                log_error(24, 'Unknown Exception - GurobiError.message failed')
-            return False
-        except Exception as err:
-            log_error(23, [f'Unknown Exception {type(err).__name__}', '\\n'.join(traceback.format_exc().split('\n'))])
-            return False
-
-        # Attach useful objects to Gurobi model so that they can always be accessed
-        model._data = data
-        model._tree = Tree(opt_params['depth'])
-        model._lambda = opt_params.get('lambda', None)
-
-        # Build the model (add variables, constraints, objective, initial cuts)
-        try:
-            self.build_model(model)
-        except Exception as err:
-            print(traceback.format_exc())
-            log_error(21, [f'Unknown Exception {type(err).__name__}','\\n'.join(traceback.format_exc().split('\n'))])
-            return False
-
-
-        if opt_params['Warmstart']:
-            time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f'{self.model_type} model entering warm_start() at {time_now}')
-            self.warm_start(model)
-
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model entering gen_callback() at {time_now}')
-
-        # Generate the callback function
-        callback = self.callback_generator.gen_callback()
-
-        model_build_time = time.time() - model_build_start_time
-
-        # Modify the behaviour of fit to only return information about the relaxation
-        if opt_params['Compare Relaxations']:
-            model.update()
-            print('\n' + '-' * 5 + ' Relaxation Comparison Requested ' + '-' * 5)
-            self.run_relaxations(model, callback=callback)
-
-            # Set the node limit to one so that only the root node is explored
-            model.Params.NodeLimit = 1
-
-        print(f'Built Gurobi model in {model_build_time:.2f} seconds')
-
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model beginning optimisation at {time_now}')
-
-        self.optimise_model(model, callback=callback)
-
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model finishing optimisation at {time_now}')
-
-        self._model = model
-
-        # Run post optimisation checks, i.e. was model solve successful, is the solution actually feasible?
-        self._post_optimisation_check(model)
-
-        return self._model_trained
-
-    def run_relaxations(self, model, callback=None):
-        """Evaluates the model relaxation, with and without presolve
-
-        Results are logged automatically to results csv file. Generally used with NodeLimit set to one to give a
-        picture of the strength of a relaxation
-
-        Args:
-            model (grbModel): Gurobi model object
-            callback (func): Callback function
-
-        """
-
-
-        presolved_model = model.presolve().relax()
-        relaxed_model = model.relax()
-
-        relaxed_model.Params.Presolve = 0
-        # relaxed_model.Params.Aggregate = 0
-        # relaxed_model.Params.AggFill = 0
-
-        relaxed_model.optimize(callback)
-        self.update_model_stats('Relaxation Comparison (Raw Model)',
-                                relaxed_model.objVal,
-                                relaxed_model.Runtime)
-
-        presolved_model.optimize(callback)
-        self.update_model_stats('Relaxation Comparison (Presolved Model)',
-                                presolved_model.objVal,
-                                presolved_model.Runtime)
-
-        # Reset the relaxation statistics in the callback in case they were overwritten by the raw/presolved models
-        self.callback_generator.relaxation_statistics = {'Initial Root Relaxation - Obj': None,
-                                      'Initial Root Relaxation - Time': None,
-                                      'Initial Root Relaxation - Work': None,
-                                      'Presolve Relaxation - Obj': None,
-                                      'Presolve Relaxation - Time': None,
-                                      'Presolve Relaxation - Work': None,
-                                      'Final Root Relaxation - Obj': None,
-                                      'Final Root Relaxation - Time': None,
-                                      'Final Root Relaxation - Work': None}
-
-    def optimise_model(self, model, callback=None):
-        """Optimise the Gurobi model
-
-        Args:
-            model (grbModel): Gurobi model to optimise
-            callback: Optional callback function.
-        """
-
-        model_opt_start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        print(f'Beginning model solve at {model_opt_start_time}')
-        model._opt_start_time = model_opt_start_time
-
-        model.optimize(callback)
-
-    def _post_optimisation_check(self, model):
-        """Check status of gurobi model
-
-        Sets self._model_trained = True if a feasible solution has been found by Gurobi
-        Otherwise print out why Gurobi did not return a feasible solution
-
-        Args:
-            model (grbModel): Gurobi model
-        """
-
-        # Check if an exception was raised in a callback subroutine
-        # If it was then disregard the results
-        if self.callback_generator.callback_exception_raised:
-            self._model_trained = False
-            return
-
-        status = model.Status
-
-        if status == GRB.INTERRUPTED:
-            log_error(100)
-
-        if status == GRB.INFEASIBLE:
-            log_error(0,notes='Model Infeasible')
-        elif status == GRB.UNBOUNDED:
-            log_error(0,notes='Model Unbounded')
-        elif status == GRB.NUMERIC:
-            log_error(0,notes='Gurobi terminated solve due to numerical issues')
-        elif status not in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.INTERRUPTED, GRB.NODE_LIMIT]:
-            log_error(1)
-        else:
-
-            try:
-                output_valid, log_messages = self._check_output_validity(model)
-                if output_valid:
-                    self._model_trained = True
-
-                else:
-                    # If the output is invalid we log an error message and attempt to write debug information to file
-                    # This includes the value of all variables in the solution, and the data dictionary
-
-                    self._model_trained = False
-                    log_error(2, log_messages)
-
-                    variables = model._variables
-
-                    data_to_save = {var_name: {k: var_dict[k].X for k in var_dict}
-                                    for var_name, var_dict in variables.items()}
-                    data_to_save['data'] = model._data
-
-                    with open(os.path.join(self.log_dir, 'debug_output.pickle'), 'wb') as f:
-                        pickle.dump(data_to_save, f)
-
-
-            except Exception as err:
-                log_error(157, f'Failed with Exception {type(err).__name__}')
-                self._model_trained = True
-
-
-    def get_gurobi_model(self):
-        """Preferred method to retrieve the Gurobi model. Returns None if the model was not successfully trained
-
-        """
-
-        if self._model_trained:
-            return self._model
 
     def _get_log_dir(self,data=None,model=None):
         """Helper function to retrieve the name of the logging directory
@@ -1567,64 +1116,54 @@ class OCT(ABC):
 
         self.logger = my_logger
 
-    @abstractmethod
-    def add_vars(self, model):
-        """User defined method to define model variables
+    def get_stats_log(self):
+        """Helper function which parses self.stats for logging purposes
 
-        Added variables must be attached to the model in a dictionary
-        named model._variables where key-value pairs are variable name and variable object
+        Returns a string which can be printed and a dictionary with column entries to be saved to file
+        By default only prints out stats for CART heuristic but can be modified or overwritten
 
-        Args:
-            model (grbModel): Model to add variables to
+        Returns:
+            Returns a tuple (log_printout, logged_results)
+            log_printout is a string which should print out results concerning heuristic stats (return None if no heuristic used)
+            logged_results is a dictionary where the keys are the names of the columns in the results save file
+            and values are the corresponding entries for that column
         """
 
-    @abstractmethod
-    def add_constraints(self, model):
-        """User defined method to define model constraints
+        stats = self.stats
+        logged_results = {}
 
-        Variables should be accessed through model._variables
+        logged_results |= self.results_to_log
 
-        Args:
-            model (grbModel): Model to add constraints to
-        """
+        log_printout = []
 
-    @abstractmethod
-    def add_objective(self, model):
-        """User defined method to define model objective
+        if 'CART' in stats:
+            log_printout.append('\nHeuristic Statistics:')
+            if 'Unpolished Obj' in stats['CART']:
+                log_printout.append(f'CART - Obj = {stats['CART']['Num']} (polished from {stats['CART']['Unpolished Obj']}) in {stats['CART']['Time']:.2f}s')
+            else:
+                log_printout.append(f'CART - Obj = {stats['CART']['Num']} in {stats['CART']['Time']:.2f}s')
 
-        Variables should be accessed through model._variables
+            logged_results['CART Obj'] = stats['CART']['Num']
+            logged_results['CART Runtime'] = stats['CART']['Time']
 
-        Args:
-            model (grbModel): Model to add objective to
-        """
+        if 'Relaxation Comparison (Raw Model)' in stats or 'Relaxation Comparison (Presolved Model)' in stats:
+            log_printout.append('\nRelaxation Comparison Statistics')
+            if 'Relaxation Comparison (Raw Model)' in stats:
+                log_printout.append(f'Raw model relaxation = {stats['Relaxation Comparison (Raw Model)']['Num']}. Solve in {stats['Relaxation Comparison (Raw Model)']['Time']:.2f}s')
+                logged_results['Relaxation Comparison - Raw Objective'] = stats['Relaxation Comparison (Raw Model)']['Num']
+                logged_results['Relaxation Comparison - Raw Solve Time'] = stats['Relaxation Comparison (Raw Model)']['Time']
+            if 'Relaxation Comparison (Presolved Model)' in stats:
+                log_printout.append(f'Presolved model relaxation = {stats['Relaxation Comparison (Presolved Model)']['Num']}. Solve in {stats['Relaxation Comparison (Presolved Model)']['Time']:.2f}s')
+                logged_results['Relaxation Comparison - Presolved Objective'] = stats['Relaxation Comparison (Presolved Model)']['Num']
+                logged_results['Relaxation Comparison - Presolved Solve Time'] = stats['Relaxation Comparison (Presolved Model)']['Time']
 
-    def _add_initial_cuts(self, model):
-        """Add initial cuts from self.available_cuts into the model
 
-        This method also attaches the solution_completers associated with the cuts to the model object
+        if len(log_printout) == 0:
+            return None, logged_results
+        else:
+            return '\n'.join(log_printout), logged_results
 
-        Args:
-            model (grbModel): Gurobi model to add initial cuts to
-        """
-
-        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f'{self.model_type} model entering _add_initial_cuts() at {time_now}')
-
-        self.cut_manager.add_cuts(model)
-        model._solution_completers = self.cut_manager.get_solution_completers()
-
-    def warm_start(self, model):
-        """Run heuristic and add solution as warmstart
-
-        Should be overwritten if a warmstart is required
-        Method should call some heuristic solver and add solution as initial start
-
-        Args:
-            model (grbModel): Model to add warmstart solution to
-        """
-
-        log_error(112, f'Subclass model {self.model_type} has not implemented a warm_start method')
-
+class ModelProcessingMixin():
     def post_process_model(self):
         """High level method to process model results and write results to file
 
@@ -1787,51 +1326,543 @@ class OCT(ABC):
 
         return None
 
-    def get_stats_log(self):
-        """Helper function which parses self.stats for logging purposes
+class OCT(ABC, LoggingMixin, ModelProcessingMixin):
+    """Base class for optimal classification tree models
 
-        Returns a string which can be printed and a dictionary with column entries to be saved to file
-        By default only prints out stats for CART heuristic but can be modified or overwritten
+    Provides various functions for settings up Gurobi models, training, logging, and post processing the model.
 
-        Returns:
-            Returns a tuple (log_printout, logged_results)
-            log_printout is a string which should print out results concerning heuristic stats (return None if no heuristic used)
-            logged_results is a dictionary where the keys are the names of the columns in the results save file
-            and values are the corresponding entries for that column
+    For a user subclassing the base class, the following are the minimal methods which must be implemented:
+        add_vars: Add decision variables to Gurobi model
+        add_constraints: Add constraints to Gurobi model
+        add_objective: Define the objective of the Gurobi model
+
+
+    The following methods are optional but recommended:
+        warm_start: Provide a warm start solution to the model
+        vars_to_readable: Convert the decision variables from the optimised model to a readable format
+        save_model_output: Save decision vars in readable format to file
+        summarise_tree_info: Create a log output with information about the optimised solution
+        _check_output_validity: Confirm the feasibility of the optimised solution
+
+
+    The Gurobi model object has many attributes on it. data should be accessed by model_data. add_vars should attach
+    the decision variables as model._variables, and then add_constraints and add_objective should access the variables
+    via the model object. model also has an opts attribute, this is a set which can be used to specify functionality/options
+    E.g. to specify constraints that heuristic solutions must follow
+
+
+    The user defined settings are split into opt_params and gurobi_params. gurobi_params allows the user to set Gurobi
+    parameters, see gurobi_params_base_default in __init__ method for currently implemented options
+
+
+    opt_params is a dictionary with the following options:
+        Warmstart (bool): Enable warmstarting the solution
+        Polish Warmstart (bool): Enable solution polishing of warmstart solution
+        Base Directory (str): Base directory for project. By default set relative to location of base_classes.py
+        Results Directory (str): Name of results directory. This is the name of the experiment
+        Compare Relaxations (bool): Enable to log various relaxation statistics (Note that this stops the optimisation after the root node)
+        depth: (int): Maximum depth of tree to optimise over
+        lambda (float): Regularisation parameter lambda. Set to None for variants without regularisation
+        Use Baseline (bool): Ignore check on usefullness of callback subroutines/initial cuts. Must be set to True for baseline model
+        Callback (dict): Dict of dicts, each key is the name of a callback subroutine with associated value being a dictionary of settings
+        Initial Cuts (dict): Same structure as Callback settings dict
+
+    The subclass __init__ should look something like:
+
+        class OCTSubclass(OCT):
+            def __init__(self, opt_params, gurobi_params):
+                super().__init__(opt_params, gurobi_params, callback_generator=MyCallbackGenerator, cut_manager=MyInitialCutManager)
+                self.model_type = 'OCTSubclass'
+
+    Attributes:
+        model_type: The name of the model. Must be set in __init__ AFTER call to super.__init__
+        model: The Gurobi model object
+        cut_manager: The initial cut manager
+        callback_generator:
+        GurobiLogFile: The name of the Gurobi log file
+        stats: Dict storing statistics for logging. Currently only used for logging warmstart statistics
+        _model_trained: False by default, only set to true after optimisation with feasible solution returned
+
+    """
+
+    _model_trained = False
+
+    def __init__(self,
+                 user_opt_params,
+                 user_gurobi_params,
+                 opt_params_defaults=None,
+                 gurobi_params_defaults=None,
+                 callback_generator=None,
+                 cut_manager=None):
+
+        """ Base initialisation for OCT models
+
+        Handles parameter initialisation for Gurobi, OCT model, initial cuts and callback
+
+        To use __init__ method when inheriting from this class, use super.__init__ and pass in
+        the arguments described below in Args. self.model_type must be set AFTER calling super.__init__
+        or else the default name will be taken
+
+        Alternatively, subclass __init__ can handle functionality by itself.
+        It must do the following:
+            Set the name of the model in self.model_type
+            Set self.opt_params to be a dictionary of optimisation params (See below defaults which must be set)
+            Set self.gurobi_params to be a dictionary of gurobi params (See below defaults which must be set)
+            Set self.callback_generator with an instance of GenCallback
+            Set self.initial_cuts with a dict
+
+        Args:
+            user_opt_params (dict): Opt params passed by user
+            user_gurobi_params (dict): Gurobi params passed by user
+            opt_params_defaults (dict): Default opt params optionally set by subclass
+            gurobi_params_defaults (dict): Default gurobi params optionally set by subclass
+            callback_generator (GenCallback): Optional callback generator provided by subclass
+            available_cuts (dict[str:InitialCut]): Optional dict of available cut.
+                                                   Key should be the name of cut and value should be a subclass of InitialCut
         """
 
-        stats = self.stats
-        logged_results = {}
 
-        log_printout = []
+        self.model_type = 'OCTBase'
 
-        if 'CART' in stats:
-            log_printout.append('\nHeuristic Statistics:')
-            if 'Unpolished Obj' in stats['CART']:
-                log_printout.append(f'CART - Obj = {stats['CART']['Num']} (polished from {stats['CART']['Unpolished Obj']}) in {stats['CART']['Time']:.2f}s')
-            else:
-                log_printout.append(f'CART - Obj = {stats['CART']['Num']} in {stats['CART']['Time']:.2f}s')
+        opt_params_base_default = {'Warmstart': True,
+                                   'Polish Warmstart': True,
+                                   'Base Directory': os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                   'Results Directory': 'Test Folder',
+                                   'Compare Relaxations': False,
+                                   'depth': 3,
+                                   'lambda': None,
+                                   'Use Baseline': False,
+                                   'Subjob id': None,
+                                   'Array Job id': None,
+                                   'Debug Mode': False}
 
-            logged_results['CART Obj'] = stats['CART']['Num']
-            logged_results['CART Runtime'] = stats['CART']['Time']
+        gurobi_params_base_default = {'TimeLimit': 3600,
+                                      'Threads': 1,
+                                      'MIPGap': 0,
+                                      'MIPFocus': 0,
+                                      'Heuristics': 0.05,
+                                      'NodeMethod': -1,
+                                      'Method': -1,
+                                      'Seed': 0,
+                                      'Presolve': -1,
+                                      'LogToConsole': 0,
+                                      'LogToFile': True,
+                                      'NodeLimit': float('inf')}
 
-        if 'Relaxation Comparison (Raw Model)' in stats or 'Relaxation Comparison (Presolved Model)' in stats:
-            log_printout.append('\nRelaxation Comparison Statistics')
-            if 'Relaxation Comparison (Raw Model)' in stats:
-                log_printout.append(f'Raw model relaxation = {stats['Relaxation Comparison (Raw Model)']['Num']}. Solve in {stats['Relaxation Comparison (Raw Model)']['Time']:.2f}s')
-                logged_results['Relaxation Comparison - Raw Objective'] = stats['Relaxation Comparison (Raw Model)']['Num']
-                logged_results['Relaxation Comparison - Raw Solve Time'] = stats['Relaxation Comparison (Raw Model)']['Time']
-            if 'Relaxation Comparison (Presolved Model)' in stats:
-                log_printout.append(f'Presolved model relaxation = {stats['Relaxation Comparison (Presolved Model)']['Num']}. Solve in {stats['Relaxation Comparison (Presolved Model)']['Time']:.2f}s')
-                logged_results['Relaxation Comparison - Presolved Objective'] = stats['Relaxation Comparison (Presolved Model)']['Num']
-                logged_results['Relaxation Comparison - Presolved Solve Time'] = stats['Relaxation Comparison (Presolved Model)']['Time']
+        # Keep track of which settings have been explicitly set by the user to create the log directory
+        self.user_params = user_opt_params | user_gurobi_params
 
+        # Create the opt_params and gurobi_params dict by merging in default and user settings
+        self.opt_params = _merge_settings(opt_params_base_default, opt_params_defaults, user_opt_params)
+        self.gurobi_params = _merge_settings(gurobi_params_base_default, gurobi_params_defaults, user_gurobi_params)
 
-        if len(log_printout) == 0:
-            return None, []
+        # Initialise the cut manager with the initial cut settings
+        if cut_manager is None:
+            self.cut_manager = InitialCutManager([], {})
         else:
-            return '\n'.join(log_printout), logged_results
+            cut_settings = self.opt_params.get('Initial Cuts',{})
+            self.cut_manager = cut_manager(cut_settings)
+
+        # Initialise the callback generator with the callback settings
+        if callback_generator is None:
+            self.callback_generator = GenCallback([],{})
+        else:
+            callback_settings = self.opt_params.get('Callback',{})
+            self.callback_generator = callback_generator(callback_settings)
+
+        # Get true callback settings from the callback generator
+        # This should be the result of merging in user callback settings into the default settings on each subroutine
+        self.opt_params['Callback'] = self.callback_generator.callback_settings
+
+        # Get true initial cut settings from the initial cut manager
+        # This should be the result of merging in user initial cut settings into the default settings on each subroutine
+        self.opt_params['Initial Cuts'] = self.cut_manager.cut_settings
+
+
+    def create_model(self):
+        """Create Gurobi model object
+
+        Sets Gurobi model parameters based on self.gurobi_params
+        Also Sets up the Gurobi logfile from the string in self.GurobiLogFile
+        By default this will be the empty string '', to use the Gurobi logfile it must be set before create_model is called
+        this happens automatically if using the fit method
+
+        Returns:
+            Return the created Gurobi model object
+        """
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model entering create_model() at {time_now}')
+
+        model = Model()
+
+        model.Params.LogToConsole = 0
+
+        if self.gurobi_params['LogToFile']:
+
+            # By default, the file location will be an empty string.
+            # Need to set using self._set_gurobi_logfile(), will be done automatically done if using self.fit()
+            model.params.LogFile = self.GurobiLogFile
+
+            # Clear out the logfile if it already exists
+            if os.path.exists(model.params.LogFile):
+                open(model.params.LogFile, 'w').close()
+
+        model.Params.MIPGap = self.gurobi_params['MIPGap']
+        model.Params.MIPFocus = self.gurobi_params['MIPFocus']
+        model.Params.Heuristics = self.gurobi_params['Heuristics']
+        model.Params.TimeLimit = self.gurobi_params['TimeLimit']
+        model.Params.Threads = self.gurobi_params['Threads']
+        model.Params.Method = self.gurobi_params['Method']
+        model.Params.NodeMethod = self.gurobi_params['NodeMethod']
+        model.Params.Seed = self.gurobi_params['Seed']
+        model.Params.NodeLimit = self.gurobi_params['NodeLimit']
+        model.Params.LogToConsole = self.gurobi_params['LogToConsole']
+        model.Params.Presolve = self.gurobi_params['Presolve']
+
+        model._opts = set()     # Set of options which can be set as flags to modify subroutine behaviour
+        model._model_name = self.model_type
+
+        # Do this to ensure that we can access params before we optimise the model (sometimes needed for initial cuts)
+        model.update()
+
+        return model
+
+    def build_model(self,model):
+        """Run through methods to construct model
+
+        Args:
+            model (grbModel): Gurobi model to add vars, constraints, etc... to
+
+        """
+
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model entering build_model() at {time_now}')
+
+        self.add_vars(model)
+        self.add_constraints(model)
+        self.add_objective(model)
+        self._add_initial_cuts(model)
+        self.callback_generator.update_model(model)
+
+    def fit(self, data):
+        """Fits optimal classification tree given dataset.
+
+        Does the following:
+            Creates the gurobi model object
+            Sets up logging (gurobi and user logfiles)
+            Checks if the settings provided are 1) valid and 2) provide a benefit compared to the baseline.
+            Calls _build_model to add variables, constraints, objective, etc...
+            Runs warmstart if requested
+            Optimises the model
+            Check that a feasible solution was found
+
+        Args:
+            data (dict): Dictionary containing dataset. At a minimum should contain 'X', 'y', 'name', 'encoded name' entries
+        """
+
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model entering fit() at {time_now}')
+
+        opt_params = self.opt_params
+        
+        self._setup_logging(data)
+
+        # Validate the callback and initial cut settings
+        callback_settings_valid, callback_valid_log_messages = self.callback_generator.valid_settings(model_opts=opt_params, data=data)
+        cut_settings_valid, cut_valid_log_messages = self.cut_manager.valid_settings(model_opts=opt_params, data=data)
+        
+        # Check if there are any useful callback or initial cut settings
+        if opt_params['Use Baseline']:
+            # 'Use Baseline' disables usefulness checks. Required if running baseline models without any initial cuts/callback subroutines
+            callback_settings_useful, callback_useful_log_messages = True, None
+            cut_settings_useful, cut_useful_log_messages = True, None
+        else:
+            callback_settings_useful, callback_useful_log_messages = self.callback_generator.useful_settings(model_opts=opt_params, data=data)
+            cut_settings_useful, cut_useful_log_messages = self.cut_manager.useful_settings(model_opts=opt_params,data=data)
+        
+        all_settings_valid = callback_settings_valid and cut_settings_valid
+        some_settings_useful = cut_settings_useful or callback_settings_useful    
+        
+        # Raise errors and warnings
+        if not callback_settings_valid:
+            log_error(10, callback_valid_log_messages)
+        if not cut_settings_valid:
+            log_error(11, cut_valid_log_messages)
+        if not callback_settings_useful:
+            log_error(110, callback_useful_log_messages)
+        if not cut_settings_useful:
+            (111, cut_useful_log_messages)
+        
+        if not (all_settings_valid and some_settings_useful):
+            if not some_settings_useful:
+                log_error(12)
+            return False
+
+        model_build_start_time = time.time()
+
+        # Create the gurobi model. If it fails log an error and exit
+        # Should pick up if a licence isn't available
+        try:
+            model = self.create_model()
+        except GurobiError as err:
+            try:
+                log_error(23, err.message)
+            except:
+                log_error(24, 'Unknown Exception - GurobiError.message failed')
+            return False
+        except Exception as err:
+            log_error(23, [f'Unknown Exception {type(err).__name__}', '\\n'.join(traceback.format_exc().split('\n'))])
+            return False
+
+        # Attach useful objects to Gurobi model so that they can always be accessed
+        model._data = data
+        model._tree = Tree(opt_params['depth'])
+        model._lambda = opt_params.get('lambda', None)
+
+        # Build the model (add variables, constraints, objective, initial cuts)
+        try:
+            self.build_model(model)
+        except Exception as err:
+            print(traceback.format_exc())
+            log_error(21, [f'Unknown Exception {type(err).__name__}','\\n'.join(traceback.format_exc().split('\n'))])
+            return False
+
+
+        if opt_params['Warmstart']:
+            time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f'{self.model_type} model entering warm_start() at {time_now}')
+            self.warm_start(model)
+
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model entering gen_callback() at {time_now}')
+
+        # Generate the callback function
+        callback = self.callback_generator.gen_callback()
+
+        model_build_time = time.time() - model_build_start_time
+
+        # Modify the behaviour of fit to only return information about the relaxation
+        if opt_params['Compare Relaxations']:
+            model.update()
+            print('\n' + '-' * 5 + ' Relaxation Comparison Requested ' + '-' * 5)
+            self.run_relaxations(model, callback=callback)
+
+            # Set the node limit to one so that only the root node is explored
+            model.Params.NodeLimit = 1
+
+        print(f'Built Gurobi model in {model_build_time:.2f} seconds')
+
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model beginning optimisation at {time_now}')
+
+        self.optimise_model(model, callback=callback)
+
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model finishing optimisation at {time_now}')
+
+        self._model = model
+
+        # Run post optimisation checks, i.e. was model solve successful, is the solution actually feasible?
+        self._post_optimisation_check(model)
+
+        return self._model_trained
+
+    def run_relaxations(self, model, callback=None):
+        """Evaluates the model relaxation, with and without presolve
+
+        Results are logged automatically to results csv file. Generally used with NodeLimit set to one to give a
+        picture of the strength of a relaxation
+
+        Args:
+            model (grbModel): Gurobi model object
+            callback (func): Callback function
+
+        """
+
+
+        presolved_model = model.presolve().relax()
+        relaxed_model = model.relax()
+
+        relaxed_model.Params.Presolve = 0
+        # relaxed_model.Params.Aggregate = 0
+        # relaxed_model.Params.AggFill = 0
+
+        relaxed_model.optimize(callback)
+        self.update_model_stats('Relaxation Comparison (Raw Model)',
+                                relaxed_model.objVal,
+                                relaxed_model.Runtime)
+
+        presolved_model.optimize(callback)
+        self.update_model_stats('Relaxation Comparison (Presolved Model)',
+                                presolved_model.objVal,
+                                presolved_model.Runtime)
+
+        # Reset the relaxation statistics in the callback in case they were overwritten by the raw/presolved models
+        self.callback_generator.relaxation_statistics = {'Initial Root Relaxation - Obj': None,
+                                      'Initial Root Relaxation - Time': None,
+                                      'Initial Root Relaxation - Work': None,
+                                      'Presolve Relaxation - Obj': None,
+                                      'Presolve Relaxation - Time': None,
+                                      'Presolve Relaxation - Work': None,
+                                      'Final Root Relaxation - Obj': None,
+                                      'Final Root Relaxation - Time': None,
+                                      'Final Root Relaxation - Work': None}
+
+    def optimise_model(self, model, callback=None):
+        """Optimise the Gurobi model
+
+        Args:
+            model (grbModel): Gurobi model to optimise
+            callback: Optional callback function.
+        """
+
+        model_opt_start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        print(f'Beginning model solve at {model_opt_start_time}')
+        model._opt_start_time = model_opt_start_time
+
+        model.optimize(callback)
+
+    def _post_optimisation_check(self, model):
+        """Check status of gurobi model
+
+        Sets self._model_trained = True if a feasible solution has been found by Gurobi
+        Otherwise print out why Gurobi did not return a feasible solution
+
+        Args:
+            model (grbModel): Gurobi model
+        """
+
+        # Check if an exception was raised in a callback subroutine
+        # If it was then disregard the results
+        if self.callback_generator.callback_exception_raised:
+            self._model_trained = False
+            return
+
+        status = model.Status
+
+        if status == GRB.INTERRUPTED:
+            log_error(100)
+
+        if status == GRB.INFEASIBLE:
+            log_error(0,notes='Model Infeasible')
+        elif status == GRB.UNBOUNDED:
+            log_error(0,notes='Model Unbounded')
+        elif status == GRB.NUMERIC:
+            log_error(0,notes='Gurobi terminated solve due to numerical issues')
+        elif status not in [GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.INTERRUPTED, GRB.NODE_LIMIT]:
+            log_error(1)
+        else:
+
+            try:
+                output_valid, log_messages = self._check_output_validity(model)
+            except Exception as err:
+                log_error(157, f'Failed with Exception {type(err).__name__}')
+                output_valid = False
+
+            if output_valid:
+                self._model_trained = True
+
+            else:
+                # If the output is invalid we log an error message and attempt to write debug information to file
+                # This includes the value of all variables in the solution, and the data dictionary
+
+                self._model_trained = False
+                log_error(2, log_messages)
+
+                try:
+                    variables = model._variables
+
+                    data_to_save = {}
+
+                    for var_name, var_storage in variables.items():
+                        if isinstance(var_storage, dict):
+                            data_to_save[var_name] = {k: v.X for k,v in var_storage.items()}
+                        elif isinstance(var_storage, Var):
+                            data_to_save[var_name] = var_storage.X
+
+                    data_to_save['data'] = model._data
+
+                    with open(os.path.join(self.log_dir, 'debug_output.pickle'), 'wb') as f:
+                        pickle.dump(data_to_save, f)
+
+                except Exception as err:
+                    log_error(158, f'Failed with Exception {type(err).__name__}')
+
+    def get_gurobi_model(self):
+        """Preferred method to retrieve the Gurobi model. Returns None if the model was not successfully trained
+
+        """
+
+        if self._model_trained:
+            return self._model
+
+    @abstractmethod
+    def add_vars(self, model):
+        """User defined method to define model variables
+
+        Added variables must be attached to the model in a dictionary
+        named model._variables where key-value pairs are variable name and variable object
+
+        Args:
+            model (grbModel): Model to add variables to
+        """
+
+    @abstractmethod
+    def add_constraints(self, model):
+        """User defined method to define model constraints
+
+        Variables should be accessed through model._variables
+
+        Args:
+            model (grbModel): Model to add constraints to
+        """
+
+    @abstractmethod
+    def add_objective(self, model):
+        """User defined method to define model objective
+
+        Variables should be accessed through model._variables
+
+        Args:
+            model (grbModel): Model to add objective to
+        """
+
+    def _add_initial_cuts(self, model):
+        """Add initial cuts from self.available_cuts into the model
+
+        This method also attaches the solution_completers associated with the cuts to the model object
+
+        Args:
+            model (grbModel): Gurobi model to add initial cuts to
+        """
+
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'{self.model_type} model entering _add_initial_cuts() at {time_now}')
+
+        self.cut_manager.add_cuts(model)
+        model._solution_completers = self.cut_manager.get_solution_completers()
+
+    def warm_start(self, model):
+        """Run heuristic and add solution as warmstart
+
+        Should be overwritten if a warmstart is required
+        Method should call some heuristic solver and add solution as initial start
+
+        Args:
+            model (grbModel): Model to add warmstart solution to
+        """
+
+        log_error(112, f'Subclass model {self.model_type} has not implemented a warm_start method')
 
     def cleanup_GRB_environment(self):
+        """ Explicitly cleanup Gurobi environment after usage
+
+        Ultimate intention is to have this available to clean up the model in a signal handler if the process is killed
+        by an external signal (E.g. hitting maximum time limit on HPC cluster). This is meant to ensure that the licence
+        token is returned
+
+        """
+
         self._model.dispose()
         mystr = disposeDefaultEnv()

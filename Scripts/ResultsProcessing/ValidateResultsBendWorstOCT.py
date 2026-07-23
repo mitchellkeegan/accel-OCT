@@ -19,13 +19,13 @@ pd.set_option('display.expand_frame_repr', False)
 
 EPS = 1e-4
 
-model = 'BendOCT'
+BendWorstOCT_experiment_names = ['Baseline',
+                                 'EQP',
+                                 'ModifiedCuts',
+                                 'SolutionPolishing',
+                                 'WorstAccel']
 
-FlowRegOCT_experiment_names = ['Baseline']
-BendRegOCT_experiment_names = ['Baseline']
-
-experiments = [('FlowRegOCT', FlowRegOCT_experiment_names),
-               ('BendRegOCT', BendRegOCT_experiment_names)]
+experiments = [('BendWorstOCT', BendWorstOCT_experiment_names)]
 
 results_base = os.path.join('../..', 'Results')
 
@@ -41,9 +41,6 @@ for base_model, experiment_names in experiments:
                                 f'{exp_name}.csv')
 
         df_model = pd.read_csv(filename)
-
-        if exp_name == 'EnhancedCutsBROKEN':
-            df_model = df_model[df_model['Benders Cuts-EC Level'] == 1]
 
         models.append(df_model)
 
