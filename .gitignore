@@ -166,3 +166,7 @@ profile*
 /Results/BendRegOCT/Submission1/
 /Results/Tables/TexFiles/
 /Results/Tables/AuxFiles/
+/Results/FlowRegOCT/Baseline.zip
+
+*.jpg
+*.zip
